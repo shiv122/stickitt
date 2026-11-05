@@ -887,7 +887,42 @@ impl Dock {
         edge && (y as f32 - tab_centre(self.anchor, band, h)).abs() <= band / 2.0
     }
 
+    /// The pointer is no longer over the dock: tuck it away after a moment.
+    fn pointer_left(&mut self) -> Option<DockCmd> {
+        self.pointer = None;
+        self.open_at = None;
+        self.magnify.to(0.0);
+        if self.want_open && self.input.is_none() {
+            self.close_at = Some(Instant::now() + CLOSE_DELAY);
+        }
+        self.peek_at = None;
+        if self.hover.take().is_some() {
+            self.needs_paint = true;
+            return self.end_peek();
+        }
+        None
+    }
+
     fn pointer_moved(&mut self, x: f64, y: f64) -> Option<DockCmd> {
+        // A press, drag or tab drag whose button is no longer held lost its release (macOS can
+        // send it to another window): finish it instead of letting the dock follow the pointer.
+        if !crate::input::left_button_down() {
+            self.press = None;
+            if let Some((_, _, moved)) = self.tab_drag.take() {
+                if moved {
+                    return Some(DockCmd::Moved { side: self.style.side, position: self.style.position });
+                }
+            }
+            if self.drag.is_some() {
+                return self.drop_dock();
+            }
+        }
+        // macOS keeps sending moves to a focused window from anywhere on screen; one outside the
+        // dock means the pointer left it.
+        let dragging = self.drag.is_some() || self.tab_drag.is_some();
+        if !dragging && !crate::input::inside(x, y, self.window.inner_size()) {
+            return if self.pointer.is_some() { self.pointer_left() } else { None };
+        }
         self.pointer = Some((x, y));
         if let Some((start_y, start_pos, moved)) = self.tab_drag {
             // Slide along the edge; the window follows, so work in screen coordinates.
@@ -1195,6 +1230,17 @@ impl Dock {
     }
 
     pub fn handle(&mut self, event: &WindowEvent) -> Option<DockCmd> {
+        if crate::input::debug() && !matches!(event, WindowEvent::RedrawRequested) {
+            eprintln!(
+                "dock: {event:?} | open={} expanded={} press={} drag={} tab_drag={} button_down={}",
+                self.want_open,
+                self.expanded,
+                self.press.is_some(),
+                self.drag.is_some(),
+                self.tab_drag.is_some(),
+                crate::input::left_button_down()
+            );
+        }
         match event {
             // Painting is paced by the app; an OS repaint request just marks the dock dirty.
             WindowEvent::RedrawRequested => self.needs_paint = true,
@@ -1234,19 +1280,7 @@ impl Dock {
             }
             WindowEvent::CursorMoved { position, .. } => return self.pointer_moved(position.x, position.y),
             WindowEvent::CursorLeft { .. } if self.drag.is_some() => {}
-            WindowEvent::CursorLeft { .. } => {
-                self.pointer = None;
-                self.open_at = None;
-                self.magnify.to(0.0);
-                if self.want_open && self.input.is_none() {
-                    self.close_at = Some(Instant::now() + CLOSE_DELAY);
-                }
-                self.peek_at = None;
-                if self.hover.take().is_some() {
-                    self.needs_paint = true;
-                    return self.end_peek();
-                }
-            }
+            WindowEvent::CursorLeft { .. } => return self.pointer_left(),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }
                 if self.drag.is_some() =>
             {
@@ -1283,7 +1317,7 @@ impl Dock {
                     self.toggle_menu();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if resize_modifier_held() => {
+            WindowEvent::MouseWheel { delta, .. } if crate::input::resize_modifier_held() => {
                 let up = match delta {
                     MouseScrollDelta::LineDelta(_, y) => *y > 0.0,
                     MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
@@ -1918,26 +1952,6 @@ impl TabParams {
 /// The tab's centre: at `anchor`, kept `size` clear of the window's top and bottom.
 fn tab_centre(anchor: f32, size: f32, height: f32) -> f32 {
     anchor.clamp(size / 2.0, (height - size / 2.0).max(size / 2.0))
-}
-
-/// Ctrl (or ⌘ on macOS) is held right now. Asked of the OS directly: the dock rarely has
-/// keyboard focus, so it doesn't see modifier changes.
-fn resize_modifier_held() -> bool {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
-        unsafe { GetKeyState(VK_CONTROL as i32) < 0 }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // NSEventModifierFlagControl | NSEventModifierFlagCommand
-        let flags: usize = unsafe { objc2::msg_send![objc2::class!(NSEvent), modifierFlags] };
-        flags & ((1 << 18) | (1 << 20)) != 0
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        false
-    }
 }
 
 /// Small vector shapes used by the dock.

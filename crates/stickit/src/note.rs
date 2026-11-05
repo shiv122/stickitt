@@ -620,6 +620,15 @@ impl Note {
                     self.needs_paint = true;
                 }
                 self.window.set_cursor(CursorIcon::Pointer);
+                if !crate::input::left_button_down() {
+                    self.press_at = None;
+                }
+                if !crate::input::inside(position.x, position.y, self.window.inner_size()) {
+                    if std::mem::take(&mut self.hovered) {
+                        self.needs_paint = true;
+                    }
+                    return Some(None);
+                }
                 if let Some((px, py)) = self.press_at {
                     if (position.x - px).hypot(position.y - py) > 4.0 * self.scale() as f64 {
                         self.press_at = None;
@@ -1408,6 +1417,14 @@ impl Note {
     // ---- events -------------------------------------------------------------------------
 
     pub fn handle(&mut self, event: &WindowEvent, shared: &mut Shared) -> Option<Cmd> {
+        if crate::input::debug() && !matches!(event, WindowEvent::RedrawRequested) {
+            eprintln!(
+                "note {}: {event:?} | resizing={} button_down={}",
+                self.id,
+                self.resizing.is_some(),
+                crate::input::left_button_down()
+            );
+        }
         if self.collapsed() {
             if let Some(result) = self.handle_compact(event) {
                 return result;
@@ -2589,6 +2606,25 @@ impl Note {
     }
 
     fn on_pointer_move(&mut self, x: f64, y: f64, shared: &mut Shared) {
+        // A resize, selection or hue drag whose button is no longer held lost its release
+        // (macOS can send it to another window): end it rather than follow the pointer.
+        if !crate::input::left_button_down() {
+            if self.resizing.take().is_some() {
+                self.dirty = true;
+                self.needs_paint = true;
+            }
+            self.drag_select = false;
+            self.hue_drag = false;
+        }
+        // macOS keeps sending moves to a focused window from anywhere on screen: outside the
+        // note, it is simply not hovered.
+        let busy = self.resizing.is_some() || self.drag_select || self.hue_drag;
+        if !busy && !crate::input::inside(x, y, self.window.inner_size()) {
+            if std::mem::take(&mut self.hovered) || self.hover.take().is_some() {
+                self.needs_paint = true;
+            }
+            return;
+        }
         self.pointer = (x, y);
         if self.resizing.is_some() {
             self.resize_to(x, y, shared);

@@ -6,6 +6,7 @@ mod desktops;
 mod dock;
 mod editor;
 mod gfx;
+mod input;
 mod instance;
 mod markdown;
 mod motion;

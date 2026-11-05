@@ -112,6 +112,8 @@ builds everything and keeps the files as workflow artifacts.
 Icons for every platform are generated from `assets/icon.png` (1024×1024) with
 `python scripts/make-icons.py`.
 
+Set `STICKIT_DEBUG=1` to print the dock's and notes' pointer and window events to the terminal.
+
 `stickit --bench 30 [--big]` opens sample notes in memory for performance testing;
 `scripts/measure.ps1` (Windows) and `scripts/measure.sh` (macOS) report startup time, memory and
 idle CPU.

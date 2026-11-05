@@ -1,0 +1,25 @@
+# Build output and packages
+/target
+/dist
+**/*.rs.bk
+
+# Databases (test copies; the app's own data lives in the user's app-data folder)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Settings backups the app writes next to stickit.ini
+*.ini.bak
+*.before-*
+
+# Local notes: benchmarks and scratch, not committed
+/notes/
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+desktop.ini

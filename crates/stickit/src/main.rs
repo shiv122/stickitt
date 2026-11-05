@@ -58,6 +58,7 @@ fn main() {
     let mut big = false;
     let mut db_path: Option<PathBuf> = None;
     let mut config_path: Option<PathBuf> = None;
+    let mut shots: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => bench = args.next().and_then(|n| n.parse().ok()),
@@ -65,10 +66,15 @@ fn main() {
             "--big" => big = true,
             "--db" => db_path = args.next().map(PathBuf::from),
             "--config" => config_path = args.next().map(PathBuf::from),
+            // Render the README's pictures into a folder (demo notes, light and dark), then quit.
+            "--shots" => shots = args.next().map(PathBuf::from),
             other => eprintln!("stickit: ignoring unknown argument {other}"),
         }
     }
 
+    if shots.is_some() {
+        bench = Some(0);
+    }
     let data_dir = data_dir();
     // A crash leaves its message in the data folder: a bundled app has no terminal to show it.
     log_panics(data_dir.join("stickit.log"));
@@ -120,7 +126,8 @@ fn main() {
         let proxy = Mutex::new(event_loop.create_proxy());
         instance.listen(move || send(&proxy, app::UserEvent::Relaunched));
     }
-    let mut app = app::App::new(store, bench.map(|notes| app::Bench { notes, big }), config);
+    let bench = bench.map(|notes| app::Bench { notes, big });
+    let mut app = app::App::new(store, bench, shots.map(app::Shots::new), config);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("stickit: {e}");
     }

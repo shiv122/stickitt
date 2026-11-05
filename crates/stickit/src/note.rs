@@ -2874,6 +2874,39 @@ impl Note {
     }
 
     /// Temporarily floats the note above everything while it's hovered in the dock.
+    /// Sets the note up for a `--shots` picture: light or dark, hovered (showing its controls),
+    /// and with one of its menus open: "more", "remind", "colors" or "window".
+    pub fn stage(&mut self, dark: bool, hovered: bool, menu: Option<&str>, shared: &mut Shared) {
+        if self.dark != dark {
+            // Text colours are part of the layout.
+            self.dark = dark;
+            self.layout_dirty = true;
+        }
+        self.hovered = hovered;
+        self.popover = None;
+        let action = match menu {
+            Some("more") => Some(Action::More),
+            Some("remind") => Some(Action::Remind),
+            Some("colors") => Some(Action::Colors),
+            Some("window") => Some(Action::Window),
+            _ => None,
+        };
+        if let Some(action) = action {
+            self.act(action, shared);
+        }
+        self.needs_paint = true;
+    }
+
+    /// Ends every animation at its target, so the next frame shows the note at rest (`--shots`).
+    pub fn settle(&mut self) {
+        self.pop_kind = self.popover.as_ref().map(std::mem::discriminant);
+        for m in [&mut self.chrome, &mut self.opacity, &mut self.appear, &mut self.pop_in] {
+            m.settle();
+        }
+        self.pop = None;
+        self.needs_paint = true;
+    }
+
     pub fn peek(&mut self, on: bool) {
         self.peeking = on;
         self.apply_level();

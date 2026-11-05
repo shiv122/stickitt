@@ -34,13 +34,21 @@ no web view, so the app starts instantly, idles at 0% CPU and uses a few megabyt
 brew install --cask shiv122/tap/stick-itt
 ```
 
-**Windows** (10 or 11, x64): download `Stick-itt-<version>-windows-x64.zip` from
-[Releases](https://github.com/shiv122/stickitt/releases), unzip it anywhere and run
-`Stick-itt.exe`.
+Or download `Stick-itt-<version>-macos.dmg` from
+[Releases](https://github.com/shiv122/stickitt/releases) and drag Stick-itt to Applications.
+
+**Windows** (10 or 11, x64): from [Releases](https://github.com/shiv122/stickitt/releases),
+download either
+
+- `Stick-itt-<version>-windows-setup.exe`: installs for your user (no admin prompt), with a
+  Start menu entry, an uninstaller and an option to start Stick-itt when you sign in, or
+- `Stick-itt-<version>-windows-portable.exe`: runs as is, nothing to install.
 
 Release builds are not notarized or code-signed with a paid certificate. The Homebrew cask
-clears macOS's download quarantine for you; on Windows, SmartScreen may ask you to confirm the
-first launch.
+clears macOS's download quarantine for you. From the `.dmg`, macOS blocks the first launch: open
+**System Settings → Privacy & Security** and click **Open Anyway** (or run
+`xattr -dr com.apple.quarantine /Applications/Stick-itt.app`). On Windows, SmartScreen may ask
+you to confirm the first launch.
 
 ## Getting started
 
@@ -93,9 +101,13 @@ cargo clippy --all-targets   # lints (CI treats warnings as errors)
 Packages, as built by the release workflow:
 
 ```sh
-bash scripts/package-macos.sh       # dist/Stick-itt-<version>-macos-universal.zip
-pwsh scripts/package-windows.ps1    # dist/Stick-itt-<version>-windows-x64.zip
+bash scripts/package-macos.sh       # dist/Stick-itt-<version>-macos.dmg and .zip (universal)
+pwsh scripts/package-windows.ps1    # dist/Stick-itt-<version>-windows-setup.exe and -portable.exe
 ```
+
+The Windows installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). To test the
+packaging without publishing, run the **Release** workflow by hand from the Actions tab: it
+builds everything and keeps the files as workflow artifacts.
 
 Icons for every platform are generated from `assets/icon.png` (1024×1024) with
 `python scripts/make-icons.py`.

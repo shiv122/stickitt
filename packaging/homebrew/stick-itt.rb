@@ -4,7 +4,7 @@ cask "stick-itt" do
   version "@VERSION@"
   sha256 "@SHA256@"
 
-  url "https://github.com/shiv122/stickitt/releases/download/v#{version}/Stick-itt-#{version}-macos-universal.zip",
+  url "https://github.com/shiv122/stickitt/releases/download/v#{version}/Stick-itt-#{version}-macos.zip",
       verified: "github.com/shiv122/stickitt/"
   name "Stick-itt"
   desc "Tiny native sticky notes with an edge dock, reminders and markdown"

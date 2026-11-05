@@ -2,10 +2,12 @@ name: Release
 
 # Push a tag like v0.2.0 (matching the version in Cargo.toml) to build, publish a GitHub
 # release and update the Homebrew cask. Tags with a suffix (v0.2.0-beta.1) are published as
-# pre-releases and leave the cask alone.
+# pre-releases and leave the cask alone. Run it by hand (Actions > Release > Run workflow) for a
+# dry run: everything is built and kept as workflow artifacts, nothing is published.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,8 +25,13 @@ jobs:
       - uses: actions/checkout@v4
       - id: v
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            # Dry run: build whatever version Cargo.toml says.
+            echo "version=$crate" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
           if [ "${tag%%-*}" != "$crate" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match the Cargo.toml version $crate"
             exit 1
@@ -52,7 +59,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.dmg
           if-no-files-found: error
 
   windows:
@@ -63,17 +72,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
       - run: scripts/package-windows.ps1 -Version "${{ needs.version.outputs.version }}"
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/*.zip
+          path: dist/*.exe
           if-no-files-found: error
 
   publish:
     name: Publish release
     needs: [version, macos, windows]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
       mac_sha256: ${{ steps.sums.outputs.mac }}
@@ -85,9 +101,9 @@ jobs:
       - id: sums
         working-directory: dist
         run: |
-          sha256sum *.zip > SHA256SUMS.txt
+          sha256sum Stick-itt-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          echo "mac=$(sha256sum Stick-itt-*-macos-universal.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "mac=$(sha256sum Stick-itt-*-macos.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

@@ -1,0 +1,6 @@
+# LF everywhere (shell scripts must have it; Rust and PowerShell are fine with it).
+* text=auto eol=lf
+
+*.png binary
+*.icns binary
+*.ico binary

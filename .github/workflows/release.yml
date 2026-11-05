@@ -1,0 +1,132 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build, publish a GitHub
+# release and update the Homebrew cask. Tags with a suffix (v0.2.0-beta.1) are published as
+# pre-releases and leave the cask alone.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "${tag%%-*}" != "$crate" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  macos:
+    name: Build macOS app
+    needs: [version, ci]
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/package-macos.sh "${{ needs.version.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows app
+    needs: [version, ci]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/package-windows.ps1 -Version "${{ needs.version.outputs.version }}"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [version, macos, windows]
+    runs-on: ubuntu-latest
+    outputs:
+      mac_sha256: ${{ steps.sums.outputs.mac }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - id: sums
+        working-directory: dist
+        run: |
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "mac=$(sha256sum Stick-itt-*-macos-universal.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  homebrew:
+    name: Update Homebrew cask
+    needs: [version, publish]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    # A token with contents:write on shiv122/homebrew-tap (the default GITHUB_TOKEN can't
+    # push to another repository).
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - if: env.TAP_TOKEN == ''
+        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping the cask update."
+      - if: env.TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging/homebrew
+          path: source
+      - if: env.TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: shiv122/homebrew-tap
+          token: ${{ env.TAP_TOKEN }}
+          path: tap
+      - if: env.TAP_TOKEN != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA256: ${{ needs.publish.outputs.mac_sha256 }}
+        run: |
+          mkdir -p tap/Casks
+          sed -e '/^#:/d' -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$SHA256/" \
+            source/packaging/homebrew/stick-itt.rb > tap/Casks/stick-itt.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/stick-itt.rb
+          git diff --cached --quiet || git commit -m "stick-itt $VERSION"
+          git push

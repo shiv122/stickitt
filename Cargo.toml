@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/stickit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Tiny native sticky notes with an edge dock, reminders and markdown"
+repository = "https://github.com/shiv122/stickitt"
+homepage = "https://github.com/shiv122/stickitt"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Keep debug builds responsive: our per-pixel drawing loops are far too slow unoptimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

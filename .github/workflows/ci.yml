@@ -37,8 +37,9 @@ jobs:
         include:
           - name: Windows
             os: windows-latest
+          # Intel runner: GitHub's arm64 macOS pool is often short of capacity.
           - name: macOS
-            os: macos-latest
+            os: macos-15-intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

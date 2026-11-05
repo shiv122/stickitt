@@ -368,6 +368,27 @@ impl Dock {
         Ok(dock)
     }
 
+    /// Sets the dock up for a `--shots` picture: light or dark, open or tucked away, in `view`,
+    /// with or without the right-click menu.
+    pub fn stage(&mut self, dark: bool, open: bool, view: View, menu: bool) {
+        self.dark = dark;
+        self.view = view;
+        self.start(open);
+        if self.menu != menu {
+            self.toggle_menu();
+        }
+        self.apply_geometry();
+        self.needs_paint = true;
+    }
+
+    /// Ends every animation at its target, so the next frame shows the dock at rest (`--shots`).
+    pub fn settle(&mut self) {
+        for m in [&mut self.open, &mut self.magnify, &mut self.follow, &mut self.scroll] {
+            m.settle();
+        }
+        self.needs_paint = true;
+    }
+
     pub fn is_open(&self) -> bool {
         self.want_open || self.expanded
     }

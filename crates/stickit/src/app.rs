@@ -22,6 +22,10 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
+mod shots;
+
+pub use shots::Shots;
+
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 /// Paints are paced to at most one per display frame, however many input events arrive; a
 /// high-rate mouse would otherwise trigger hundreds of repaints a second. This is the fallback
@@ -121,10 +125,12 @@ pub struct App {
     dock_stale: bool,
     /// Watching stickit.ini for saves until then; next check at the second instant.
     config_watch: Option<(Instant, Instant)>,
+    /// `--shots`: rendering the README's pictures.
+    shots: Option<Shots>,
 }
 
 impl App {
-    pub fn new(store: Store, bench: Option<Bench>, config: Config) -> Self {
+    pub fn new(store: Store, bench: Option<Bench>, shots: Option<Shots>, config: Config) -> Self {
         let active_profile = store.setting("profile").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_PROFILE);
         let mut app = Self {
             shared: Shared {
@@ -160,6 +166,7 @@ impl App {
             last_trim: Instant::now(),
             dock_stale: true,
             config_watch: None,
+            shots,
         };
         app.reload_model();
         app
@@ -800,6 +807,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.sync_tray();
         }
 
+        if self.shots.is_some() {
+            return shots::start(self, el);
+        }
         if let Some(b) = self.bench {
             let body = if b.big { big_note() } else { WELCOME.to_string() };
             for i in 0..b.notes {
@@ -982,6 +992,9 @@ impl ApplicationHandler<UserEvent> for App {
             } else {
                 wake(at);
             }
+        }
+        if let Some(t) = shots::step(self, el) {
+            wake(t);
         }
         el.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

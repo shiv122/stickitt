@@ -61,6 +61,11 @@ impl Motion {
     }
 
     /// Where the spring is heading.
+    /// Jumps to the target and stops.
+    pub fn settle(&mut self) {
+        self.spring.snap_to(self.spring.target());
+    }
+
     pub fn target_value(&self) -> f32 {
         self.spring.target()
     }

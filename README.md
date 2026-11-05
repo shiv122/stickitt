@@ -11,14 +11,25 @@
 Tiny, native sticky notes for macOS and Windows. Notes are native windows drawn in Rust, with
 no web view, so the app starts instantly, idles at 0% CPU and uses a few megabytes of memory.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/note-dark.png">
+    <img src="docs/images/note-light.png" alt="A note with a checklist, a reminder and its controls" width="340">
+  </picture>
+  &nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/dock-dark.png">
+    <img src="docs/images/dock-light.png" alt="The edge dock listing notes in two lists" width="290">
+  </picture>
+</p>
+
 ## Features
 
 - **Markdown notes** with live preview: headings, to-dos, lists, quotes, code and links. Type
   `/` for blocks and `:fire:` for emoji.
 - **Edge dock**: a slim tab on the screen edge that slides out every note, with search, lists
-  and profiles. Drag the tab to move it; Ctrl+scroll (⌘+scroll on macOS) over the dock to resize it.
-- **Reminders**: pick a day, time and repeat from the clock menu, or type `@3pm`,
-  `@fri 9am` or `@daily 8am` in a note.
+  and profiles.
+- **Reminders**: pick a day, time and repeat, or type `@3pm`, `@fri 9am` or `@daily 8am`.
 - **Window modes**: normal, always on top, or on the desktop behind your windows.
 - **Compact view**: shrink a note to a single line with its icon and title.
 - **Trash with undo**, hide and restore, and a tray icon to get everything back.
@@ -50,43 +61,298 @@ clears macOS's download quarantine for you. From the `.dmg`, macOS blocks the fi
 `xattr -dr com.apple.quarantine /Applications/Stick-itt.app`). On Windows, SmartScreen may ask
 you to confirm the first launch.
 
-## Getting started
+## Using Stick-itt
 
-Stick-itt opens with a welcome note. From there:
+Stick-itt opens with a welcome note. Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> anywhere
+for a new one. On macOS, <kbd>Ctrl</kbd> in every shortcut here is <kbd>⌘</kbd>.
 
-- **New note**: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> from anywhere, or the tray menu.
-- **Find a note**: rest the pointer on the screen edge (or press
-  <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> and type to search).
-- **Note controls**: hover a note for colour, window mode, reminder and the ⋯ menu (lists,
-  compact view, delete).
-- **Dock menu**: right-click the dock for profiles, lists, views, Trash and Settings.
+### Notes
 
-On macOS, <kbd>Ctrl</kbd> in the shortcuts below is <kbd>⌘</kbd>.
+Write in Markdown and it formats as you type: `#` headings, `- [ ]` to-dos, `-` lists, `>`
+quotes, `` ` `` code and links. Type `/` at the start of a line for a menu of blocks, and
+`:name:` for an emoji. Click a to-do's box (or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to tick it.
+<kbd>Ctrl</kbd>+<kbd>=</kbd> and <kbd>Ctrl</kbd>+<kbd>-</kbd> zoom the text.
+
+Hover a note to show its controls along the top:
+
+| Control | What it does |
+|---|---|
+| Icon | Pick an emoji for the note (it shows in the dock and in compact view). |
+| Reminder chip | When the reminder is due; click it to change it, × to clear it. |
+| Colour dot | 22 colours plus a custom hue strip. New notes take a different colour each time. |
+| Window | Normal, always on top, or on the desktop behind your windows. |
+| ⋯ | Move the note to another list, switch to compact view, or delete it. |
+| × | Hide the note. It stays in the dock; click it there to bring it back. |
+
+<table>
+  <tr>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/note-menu-dark.png">
+        <img src="docs/images/note-menu-light.png" alt="The note menu" width="260">
+      </picture>
+      <br><sub>⋯ menu: list, compact view, delete</sub>
+    </td>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/note-window-dark.png">
+        <img src="docs/images/note-window-light.png" alt="The window mode menu" width="260">
+      </picture>
+      <br><sub>Window mode</sub>
+    </td>
+    <td align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/note-colors-dark.png">
+        <img src="docs/images/note-colors-light.png" alt="The colour picker" width="260">
+      </picture>
+      <br><sub>Colours</sub>
+    </td>
+  </tr>
+</table>
+
+Deleted notes go to the trash, and a toast offers **Undo** for a few seconds. Delete asks for a
+second click so it can't happen by accident (`confirm_delete`).
+
+### Reminders
+
+Click the clock (or press <kbd>Ctrl</kbd>+<kbd>R</kbd>) to set one: a quick "in 20 minutes",
+or a day of the coming week, a time and a repeat (once, daily, weekdays, weekly). You can also
+type the time in the reminder box, or straight into the note:
+
+```
+@3pm   @in 45m   @fri 9am   @tomorrow at 2pm   @daily 8am   @weekdays 9am   @every mon 10am
+```
+
+When it is due the note jumps to the front, wiggles and gets a red outline until you snooze
+or dismiss it.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/note-reminder-dark.png">
+    <img src="docs/images/note-reminder-light.png" alt="The reminder menu with day, time and repeat" width="300">
+  </picture>
+</p>
+
+### Compact view
+
+Choose **Compact view** in the ⋯ menu (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>) to
+fold a note into one line: its icon, its title and, for checklists, how many to-dos are done.
+Click the line to open the note, and it folds back when you click elsewhere. Drag it to move it.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/compact-dark.png">
+    <img src="docs/images/compact-light.png" alt="Three notes in compact view" width="180">
+  </picture>
+</p>
+
+### The dock
+
+Rest the pointer on the right edge of the screen (or press
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd>) and the dock slides out with every note, grouped by
+list. Hovering a card floats that note to the front, clicking it brings the note up (even a
+hidden one), and typing searches. **New note** at the bottom adds a note to the list.
+
+- **Move it**: drag the tab up or down the edge, or drag any card to the other side of the screen.
+- **Resize it**: <kbd>Ctrl</kbd>+scroll (<kbd>⌘</kbd>+scroll on macOS) over the dock.
+- **Views**: a compact list, a detailed list with a line of each note, or icons that magnify
+  under the pointer like the macOS Dock.
+
+<table>
+  <tr>
+    <td align="center" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/dock-dark.png">
+        <img src="docs/images/dock-light.png" alt="The dock's detailed list" width="290">
+      </picture>
+      <br><sub>Detailed list</sub>
+    </td>
+    <td align="center" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/dock-icons-dark.png">
+        <img src="docs/images/dock-icons-light.png" alt="The dock's icon view" width="84">
+      </picture>
+      <br><sub>Icons</sub>
+    </td>
+    <td align="center" valign="top">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/images/dock-menu-dark.png">
+        <img src="docs/images/dock-menu-light.png" alt="The dock's right-click menu" width="290">
+      </picture>
+      <br><sub>Right-click menu</sub>
+    </td>
+  </tr>
+</table>
+
+**Right-click the dock** for everything else:
+
+- **Profiles**: sets of lists you switch between, such as Work and Home
+  (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> for the next one). On Windows each virtual desktop
+  can remember its own profile.
+- **Lists**: tick the lists the current profile shows, add new ones, or remove one with its ×.
+  Move a note between lists from its ⋯ menu.
+- **View**: compact list, detailed list or icons.
+- **Trash**: click a note to restore it, or **Empty trash** (two clicks). Notes are deleted for
+  good after 30 days (`trash_days`).
+- **Settings…** opens `stickit.ini`, and **Quit Stick-itt** quits.
+
+The tray icon (menu bar on macOS) has a new note, paste as note, the dock, hide or show every
+note (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd>), a list of hidden notes, settings and quit. Closing the windows from the taskbar
+sends Stick-itt to the tray rather than quitting.
+
+### Shortcuts
 
 | Anywhere | | In a note | |
 |---|---|---|---|
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | New note | <kbd>Ctrl</kbd>+<kbd>R</kbd> | Reminder |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> | Clipboard to note | <kbd>Ctrl</kbd>+<kbd>T</kbd> | Window mode |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Open the dock | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> | Compact view |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Hide / show notes | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Note menu |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Next profile | <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>D</kbd> | Hide / delete |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>,</kbd> | Settings | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Tick a to-do |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> | New note | <kbd>Ctrl</kbd>+<kbd>N</kbd> | New note |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd> | Clipboard to note | <kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> | Set / clear reminder |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> | Open the dock | <kbd>Ctrl</kbd>+<kbd>T</kbd> | Next window mode |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>H</kbd> | Hide / show notes | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> | Compact view |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> | Next profile | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Note menu |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>,</kbd> | Settings | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> / <kbd>C</kbd> | Pick / next colour |
+| | | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> | Pick an icon |
+| | | <kbd>Ctrl</kbd>+<kbd>B</kbd> <kbd>I</kbd> <kbd>E</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> | Bold, italic, code, strikethrough |
+| | | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Tick a to-do |
+| | | <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>D</kbd> | Hide / delete |
+
+Every shortcut can be changed or turned off in the settings file.
 
 ## Configuration
 
-Settings live in `stickit.ini`, created on first launch next to your notes:
+Everything is in `stickit.ini`, created on first launch next to your notes:
 
 | | Location |
 |---|---|
 | Windows | `%APPDATA%\Stick-itt\` |
 | macOS | `~/Library/Application Support/Stick-itt/` |
 
-Open it with **Settings…** in the dock or tray menu. Every option is documented in the file and
-applies within a second of saving. Sections cover the app (`[general]`), notes
-(`[notes]`, `[notes.compact]`), reminders, the dock (`[dock]`, `[dock.list]`, `[dock.icons]`,
-`[dock.tab]`), virtual desktops, and all shortcuts (`[shortcuts.global]`, `[shortcuts.note]`).
-
+Open it with **Settings…** in the dock or tray menu, or
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>,</kbd>. Every option is listed with a comment, and saved
+changes apply within a second. Sizes are in pixels at 100% display scaling. A value that can't
+be read keeps its default, and new options are added to the file when you update.
 Notes are stored in `stickit.db` (SQLite) in the same folder.
+
+An example: a narrower dock on the left that opens faster, larger note text, and blue new notes:
+
+```ini
+[notes]
+font_size     = 16
+default_color = cobalt
+
+[dock]
+side          = left
+open_delay_ms = 120
+
+[dock.list]
+width         = 220
+```
+
+<details>
+<summary><b>[general]</b>: the app</summary>
+
+| Key | Default | |
+|---|---|---|
+| `tray_icon` | `true` | Icon in the notification area (menu bar) with a quick menu |
+| `confirm_delete` | `true` | "Delete note" asks for a second click |
+| `trash_days` | `30` | Days a deleted note stays in the trash |
+| `undo_seconds` | `6` | How long the "Note deleted · Undo" toast stays |
+
+</details>
+
+<details>
+<summary><b>[notes]</b>: how notes look</summary>
+
+| Key | Default | |
+|---|---|---|
+| `default_color` | `cycle` | Colour of new notes: `cycle`, `random`, a name (`lavender`, `cobalt`, `yellow`…) or a hue `0`–`359` |
+| `font_size` | `14.5` | |
+| `line_height` | `1.5` | Multiple of the font size |
+| `icon_position` | `bar` | `bar`: small, in the top strip; `page`: large, above the text |
+| `icon_size` | `18` | |
+| `top_bar` | `38` | Height of the top strip (icon, reminder, controls) |
+| `gap` | `2` | Space between the top strip and the text |
+| `padding` / `bottom_padding` | `20` / `16` | Space around the text |
+| `radius` | `18` | Corner radius |
+| `shadow` | `1` | `0` none, `2` strong |
+| `cover` | `1` | The colour fading in from the top: `0` plain, `1` full |
+| `appear_scale` | `0.97` | Size a note grows from as it appears; `1` fades only |
+
+Colour names: Yellow, Pink, Blue, Green, Purple, Gray, Orange, Red, Brown, Teal, Sky, Indigo,
+Violet, Rose, Amber, Lime, Mint, Slate, Cobalt, Grape, Aqua, Lavender.
+
+</details>
+
+<details>
+<summary><b>[notes.compact]</b>: compact view</summary>
+
+| Key | Default | |
+|---|---|---|
+| `height` | `36` | Height of the one-line note |
+| `min_width` / `max_width` | `120` / `240` | Longer titles end in … |
+| `font_size` / `icon_size` | `13.5` / `15` | |
+| `padding` | `12` | Space at either end |
+| `radius` | `12` | Corner radius (capped at a full pill) |
+| `tint` | `0.55` | How much of the note's colour shows; `0` plain |
+| `show_progress` | `true` | Show `2/5` for notes with to-dos |
+| `collapse_on_blur` | `true` | An opened compact note folds back when you click elsewhere |
+
+</details>
+
+<details>
+<summary><b>[dock]</b>, <b>[dock.list]</b>, <b>[dock.icons]</b>, <b>[dock.tab]</b>: the dock</summary>
+
+| Key | Default | |
+|---|---|---|
+| `[dock]` `side` | `right` | `left` or `right` (dragging the dock sets it too) |
+| `position` | `0.5` | Along the edge: `0` top, `1` bottom (dragging the tab sets it too) |
+| `open_delay_ms` | `250` | How long the pointer rests on the edge before the dock opens |
+| `edge_gap` | `10` | Distance from the screen edge |
+| `[dock.list]` `width` | `264` | Card width (also <kbd>Ctrl</kbd>+scroll) |
+| `card_gap` / `row_padding` | `3` / `6` | Spacing between and inside cards |
+| `font_size` / `icon_size` | `13.5` / `16` | |
+| `radius` | `16` | Card corner radius |
+| `opacity` | `0.96` | `0.5`–`1` |
+| `hover_push` | `26` | How far a hovered card slides out; `0` off |
+| `[dock.icons]` `tile_size` | `30` | Tile size (also <kbd>Ctrl</kbd>+scroll) |
+| `tile_padding` / `tile_gap` | `10` / `8` | Spacing around and between tiles |
+| `magnify` | `1.6` | Magnification under the pointer; `1` off |
+| `[dock.tab]` `tab_color` | `auto` | `auto` follows light/dark, or a colour like `#4F8EF7` |
+| `tab_width` / `tab_height` | `4` / `52` | |
+| `tab_opacity` | `0.75` | `0` hides the tab |
+| `trigger_width` / `trigger_height` | `3` / `140` | The edge strip that opens the dock |
+
+</details>
+
+<details>
+<summary><b>[reminders]</b> and <b>[desktops]</b></summary>
+
+| Key | Default | |
+|---|---|---|
+| `[reminders]` `times` | `9am, 12pm, 3pm, 6pm, 9pm` | Times offered in the reminder menu (up to 6) |
+| `soon` | `20m, 1h, 3h` | The "in …" choices (up to 4) |
+| `[desktops]` `per_desktop` | `true` | Notes stay on their own virtual desktop (Windows) |
+| `dock_shows_other_desktops` | `false` | The dock also lists notes from other desktops |
+| `profile_per_desktop` | `true` | Each desktop remembers its own profile |
+
+</details>
+
+<details>
+<summary><b>[shortcuts.global]</b> and <b>[shortcuts.note]</b></summary>
+
+Each action takes a shortcut such as `CmdOrCtrl+Alt+N`; leave it empty to turn it off.
+Modifiers: `Ctrl`, `Shift`, `Alt`, `Cmd`/`Super`, `CmdOrCtrl`. Keys: `A`–`Z`, `0`–`9`,
+`F1`–`F24`, `Enter`, `Tab`, `Space`, `Escape`, `Backspace`, `Delete`, arrows (`ArrowUp`…),
+`Equal`, `Minus`, `Comma`, `Period`, `Slash`, `Backquote`, `BracketLeft`/`BracketRight`.
+
+Global: `new_note`, `paste_as_note`, `toggle_notes`, `open_dock`, `next_profile`,
+`open_settings`.
+
+In a note: `new_note`, `close_note`, `delete_note`, `quit`, `cycle_mode`, `pick_color`,
+`next_color`, `pick_icon`, `move_to_list`, `toggle_compact`, `toggle_todo`, `bold`, `italic`,
+`inline_code`, `strikethrough`, `add_reminder`, `clear_reminder`, `zoom_in`, `zoom_out`,
+`zoom_reset`, `open_settings`.
+
+</details>
 
 ## Building from source
 
@@ -110,7 +376,9 @@ packaging without publishing, run the **Release** workflow by hand from the Acti
 builds everything and keeps the files as workflow artifacts.
 
 Icons for every platform are generated from `assets/icon.png` (1024×1024) with
-`python scripts/make-icons.py`.
+`python scripts/make-icons.py`. The pictures in this README are rendered by the app itself
+from demo notes, in light and dark: `cargo run --release -- --shots docs/images` (windows
+appear for about 30 seconds, then it quits; your notes are not touched).
 
 Set `STICKIT_DEBUG=1` to print the dock's and notes' pointer and window events to the terminal.
 If the app ever crashes, the panic message is appended to `stickit.log` in the data folder.
@@ -122,11 +390,11 @@ idle CPU.
 ## Releasing
 
 1. Update `version` in `Cargo.toml` and commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Tag and push: `git tag v0.1.3 && git push origin v0.1.3`.
 
-The release workflow runs CI, builds the macOS universal app and the Windows zip, publishes a
-GitHub release with checksums, and updates the cask in
-[shiv122/homebrew-tap](https://github.com/shiv122/homebrew-tap). The cask update needs a
+The release workflow runs CI, builds the macOS app (`.dmg` and `.zip`) and the Windows
+installer and portable `.exe`, publishes a GitHub release with checksums, and updates the cask
+in [shiv122/homebrew-tap](https://github.com/shiv122/homebrew-tap). The cask update needs a
 `HOMEBREW_TAP_TOKEN` repository secret with write access to the tap.
 
 ## License

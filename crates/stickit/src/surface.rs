@@ -38,9 +38,32 @@ impl Surface {
     /// (whole-window fade; only honoured where the platform composites our alpha).
     pub fn paint(&mut self, width: u32, height: u32, opacity: u8, draw: impl FnOnce(&mut [u8])) {
         if width > 0 && height > 0 {
-            self.inner.paint(width, height, opacity, draw);
+            self.inner.paint(width, height, opacity, |buf| {
+                draw(buf);
+                if CAPTURE.get() {
+                    LAST.replace(Some((width, height, buf.to_vec())));
+                }
+            });
         }
     }
+}
+
+thread_local! {
+    static CAPTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LAST: std::cell::RefCell<Option<Frame>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A painted frame: width, height and premultiplied B,G,R,A bytes.
+pub type Frame = (u32, u32, Vec<u8>);
+
+/// Keep a copy of every frame painted from now on (`--shots`); see [`take_frame`].
+pub fn capture_frames() {
+    CAPTURE.set(true);
+}
+
+/// The last frame painted on this thread since [`capture_frames`].
+pub fn take_frame() -> Option<Frame> {
+    LAST.take()
 }
 
 #[cfg(windows)]

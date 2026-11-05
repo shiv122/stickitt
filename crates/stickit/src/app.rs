@@ -287,6 +287,27 @@ impl App {
         }
     }
 
+    /// The colour for a new note (`[notes] default_color`). The rotation position is kept in the
+    /// store, so it carries on across restarts.
+    fn next_color(&mut self) -> u16 {
+        use crate::config::NewNoteColor;
+        use crate::theme::ROTATION;
+        let last: usize = self.store.setting("color_turn").and_then(|v| v.parse().ok()).unwrap_or(ROTATION.len() - 1);
+        let turn = match self.shared.config.notes.default_color {
+            NewNoteColor::Fixed(color) => return color,
+            NewNoteColor::Cycle => (last + 1) % ROTATION.len(),
+            NewNoteColor::Random => {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.subsec_nanos() as usize);
+                // Any colour but the last one.
+                (last + 1 + nanos % (ROTATION.len() - 1)) % ROTATION.len()
+            }
+        };
+        self.store.set_setting("color_turn", &turn.to_string());
+        ROTATION[turn]
+    }
+
     fn create(
         &mut self,
         el: &ActiveEventLoop,
@@ -352,15 +373,12 @@ impl App {
     fn run(&mut self, el: &ActiveEventLoop, from: WindowId, cmd: Cmd) {
         match cmd {
             Cmd::NewNote => {
-                let (color, pos) = match self.notes.get(&from) {
-                    Some(n) => {
-                        let s = n.window.scale_factor();
-                        let off = (28.0 * s) as i32;
-                        let pos = n.window.outer_position().ok().map(|p| (p.x + off, p.y + off));
-                        (n.color, pos)
-                    }
-                    None => (0, None),
-                };
+                // Opens just below and right of the note it was made from.
+                let pos = self.notes.get(&from).and_then(|n| {
+                    let off = (28.0 * n.window.scale_factor()) as i32;
+                    n.window.outer_position().ok().map(|p| (p.x + off, p.y + off))
+                });
+                let color = self.next_color();
                 self.create(el, "", color, pos, true);
             }
             Cmd::SystemClose => {
@@ -473,7 +491,8 @@ impl App {
                 }
             }
             DockCmd::NewNote => {
-                self.create(el, "", 0, None, true);
+                let color = self.next_color();
+                self.create(el, "", color, None, true);
             }
             DockCmd::Opening => {
                 self.update_current_desktop();
@@ -535,6 +554,12 @@ impl App {
                 }
                 self.reload_model();
                 self.apply_visibility();
+            }
+            DockCmd::Resized { tile_size, width } => {
+                let dock = &mut self.shared.config.dock;
+                dock.tile_size = tile_size;
+                dock.width = width;
+                self.shared.config.save();
             }
             DockCmd::Moved { side, position } => {
                 self.store.set_setting("dock_side", if side == crate::config::Side::Left { "left" } else { "right" });
@@ -720,12 +745,14 @@ impl App {
     fn run_global(&mut self, el: &ActiveEventLoop, action: GlobalAction) {
         match action {
             GlobalAction::NewNote => {
-                self.create(el, "", 0, None, true);
+                let color = self.next_color();
+                self.create(el, "", color, None, true);
             }
             GlobalAction::PasteAsNote => {
                 let text = self.shared.clipboard.as_mut().and_then(|c| c.get_text().ok()).unwrap_or_default();
                 if !text.trim().is_empty() {
-                    self.create(el, text.trim(), 0, None, true);
+                    let color = self.next_color();
+                    self.create(el, text.trim(), color, None, true);
                 }
             }
             GlobalAction::ToggleNotes => {
@@ -791,7 +818,8 @@ impl ApplicationHandler<UserEvent> for App {
             Vec::new()
         });
         if recs.is_empty() {
-            if let Some(n) = self.create(el, WELCOME, 0, None, false).and_then(|id| self.notes.get_mut(&id)) {
+            let color = self.next_color();
+            if let Some(n) = self.create(el, WELCOME, color, None, false).and_then(|id| self.notes.get_mut(&id)) {
                 n.icon = "👋".to_string();
                 n.needs_paint = true;
             }

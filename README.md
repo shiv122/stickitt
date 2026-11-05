@@ -16,7 +16,7 @@ no web view, so the app starts instantly, idles at 0% CPU and uses a few megabyt
 - **Markdown notes** with live preview: headings, to-dos, lists, quotes, code and links. Type
   `/` for blocks and `:fire:` for emoji.
 - **Edge dock**: a slim tab on the screen edge that slides out every note, with search, lists
-  and profiles. Drag the tab to move it.
+  and profiles. Drag the tab to move it; Ctrl+scroll (⌘+scroll on macOS) over the dock to resize it.
 - **Reminders**: pick a day, time and repeat from the clock menu, or type `@3pm`,
   `@fri 9am` or `@daily 8am` in a note.
 - **Window modes**: normal, always on top, or on the desktop behind your windows.

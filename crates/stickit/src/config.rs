@@ -43,6 +43,9 @@ pub struct DockStyle {
     pub edge_gap: f32,
     /// Icon view.
     pub tile_size: f32,
+    /// Space around the tiles and between them.
+    pub tile_padding: f32,
+    pub tile_gap: f32,
     pub magnify: f32,
     /// The slim tab shown on the edge while tucked away; None = follow light/dark.
     pub tab_color: Option<Rgb>,
@@ -70,6 +73,8 @@ impl Default for DockStyle {
             hover_push: 26.0,
             edge_gap: 10.0,
             tile_size: 34.0,
+            tile_padding: 10.0,
+            tile_gap: 8.0,
             magnify: 1.6,
             tab_color: None,
             tab_width: 4.0,
@@ -110,7 +115,20 @@ pub struct NoteStyle {
     pub cover: f32,
     /// Size a note starts from as it appears (it grows to full size while fading in).
     pub appear_scale: f32,
+    /// Colour of new notes.
+    pub default_color: NewNoteColor,
     pub compact: CompactStyle,
+}
+
+/// The colour a new note gets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NewNoteColor {
+    /// The next colour of `theme::ROTATION` each time.
+    Cycle,
+    /// A random colour from `theme::ROTATION`, never the same as the last one.
+    Random,
+    /// Always this colour (a preset index or `theme::CUSTOM + hue`).
+    Fixed(u16),
 }
 
 /// The compact view: a note shown as one line (icon and title).
@@ -179,6 +197,7 @@ impl Default for NoteStyle {
             shadow: 1.0,
             cover: 1.0,
             appear_scale: 0.97,
+            default_color: NewNoteColor::Cycle,
             compact: CompactStyle::default(),
         }
     }
@@ -432,6 +451,31 @@ const SETTINGS: &[Setting] = &[
     num_setting!("notes", "line_height", 1.0, 2.5, notes.line_height, "multiple of the font size"),
     num_setting!("notes", "shadow", 0.0, 2.0, notes.shadow, "0 = none, 2 = strong"),
     num_setting!("notes", "cover", 0.0, 1.0, notes.cover, "colour fading in from the top: 0 = plain, 1 = full"),
+    Setting {
+        section: "notes",
+        key: "default_color",
+        doc: "colour of new notes: cycle (a different one each time), random, a name (lavender, cobalt...) or a hue 0-359",
+        get: |c| match c.notes.default_color {
+            NewNoteColor::Cycle => "cycle".into(),
+            NewNoteColor::Random => "random".into(),
+            NewNoteColor::Fixed(color) => match crate::theme::custom_hue(color) {
+                Some(hue) => format!("{hue}"),
+                None => crate::theme::color_name(color).to_lowercase(),
+            },
+        },
+        set: |c, v| {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("cycle") {
+                c.notes.default_color = NewNoteColor::Cycle;
+            } else if v.eq_ignore_ascii_case("random") {
+                c.notes.default_color = NewNoteColor::Random;
+            } else if let Some(p) = crate::theme::preset_named(v) {
+                c.notes.default_color = NewNoteColor::Fixed(p);
+            } else if let Ok(hue) = v.parse::<u16>() {
+                c.notes.default_color = NewNoteColor::Fixed(crate::theme::CUSTOM + hue % 360);
+            }
+        },
+    },
     num_setting!(
         "notes",
         "appear_scale",
@@ -499,7 +543,7 @@ const SETTINGS: &[Setting] = &[
     },
     num_setting!("dock", "edge_gap", 0.0, 60.0, dock.edge_gap, "distance from the screen edge"),
     // [dock.list]
-    num_setting!("dock.list", "width", 140.0, 520.0, dock.width, "card width"),
+    num_setting!("dock.list", "width", 140.0, 520.0, dock.width, "card width (also Ctrl+mouse wheel over the dock)"),
     num_setting!("dock.list", "card_gap", 0.0, 40.0, dock.card_gap, "space between cards"),
     num_setting!("dock.list", "row_padding", 0.0, 20.0, dock.row_padding, "space above and below the text in a card"),
     num_setting!("dock.list", "font_size", 10.0, 22.0, dock.font_size, ""),
@@ -518,7 +562,9 @@ const SETTINGS: &[Setting] = &[
     },
     num_setting!("dock.list", "hover_push", 0.0, 80.0, dock.hover_push, "how far a hovered card slides out (0 = off)"),
     // [dock.icons]
-    num_setting!("dock.icons", "tile_size", 24.0, 96.0, dock.tile_size, ""),
+    num_setting!("dock.icons", "tile_size", 16.0, 96.0, dock.tile_size, "also Ctrl+mouse wheel over the dock"),
+    num_setting!("dock.icons", "tile_padding", 2.0, 30.0, dock.tile_padding, "space around the tiles"),
+    num_setting!("dock.icons", "tile_gap", 0.0, 30.0, dock.tile_gap, "space between tiles"),
     num_setting!("dock.icons", "magnify", 1.0, 2.5, dock.magnify, "magnification under the pointer (1 = off)"),
     // [dock.tab]
     Setting {
@@ -686,6 +732,15 @@ impl Config {
         cfg.modified = path.as_deref().and_then(modified);
         cfg.path = path;
         cfg
+    }
+
+    /// Writes the settings back to the file (after a change made in the app, e.g. resizing the
+    /// dock with Ctrl+wheel). Values the user wrote are kept; comments are regenerated.
+    pub fn save(&mut self) {
+        let Some(path) = self.path.clone() else { return };
+        if std::fs::write(&path, self.render()).is_ok() {
+            self.modified = modified(&path);
+        }
     }
 
     /// Re-reads the file if it changed on disk. Returns true when settings changed.
@@ -904,6 +959,21 @@ mod tests {
         // Anything unreadable keeps the defaults.
         let bad = Config::parse("[reminders]\ntimes = 8am, lunch\nsoon =\n");
         assert_eq!(bad.reminders, ReminderSettings::default());
+    }
+
+    #[test]
+    fn default_note_colour_by_name_or_hue() {
+        let parse = |v: &str| Config::parse(&format!("[notes]\ndefault_color = {v}\n")).notes.default_color;
+        assert_eq!(Config::defaults().notes.default_color, NewNoteColor::Cycle);
+        assert_eq!(parse("Random"), NewNoteColor::Random);
+        assert_eq!(parse("cobalt"), NewNoteColor::Fixed(18));
+        assert_eq!(parse("200"), NewNoteColor::Fixed(crate::theme::CUSTOM + 200));
+        // Unknown names keep the default; every form survives a rewrite.
+        assert_eq!(parse("plaid"), NewNoteColor::Cycle);
+        for v in ["cycle", "random", "lavender", "200"] {
+            let cfg = Config::parse(&format!("[notes]\ndefault_color = {v}\n"));
+            assert_eq!(Config::parse(&cfg.render()).notes.default_color, cfg.notes.default_color, "{v}");
+        }
     }
 
     #[test]

@@ -37,8 +37,6 @@ const SECTION_H: f32 = 34.0;
 const SECTION_PILL_H: f32 = 22.0;
 const MENU_ROW_H: f32 = 30.0;
 const MENU_PAD: f32 = 8.0;
-const TILE_GAP: f32 = 8.0;
-const TILE_PAD: f32 = 10.0;
 const SEPARATOR: f32 = 14.0;
 /// Icon view: room beside the strip for magnified tiles and the name bubble.
 const LABEL_ROOM: f32 = 230.0;
@@ -138,6 +136,11 @@ pub enum DockCmd {
     Moved {
         side: Side,
         position: f32,
+    },
+    /// Ctrl+wheel changed the icon tile size or the card width.
+    Resized {
+        tile_size: f32,
+        width: f32,
     },
 }
 
@@ -258,6 +261,9 @@ pub struct Dock {
     /// The tab being dragged along its edge: pointer's screen y and the position at the press,
     /// and whether it has moved yet (a press that doesn't move is a click).
     tab_drag: Option<(f64, f32, bool)>,
+    /// Where the tab sits inside the window (physical px from the top). The window is clamped to
+    /// the screen, so near an edge the tab is not at its middle.
+    anchor: f32,
     /// Spring-animated window position after a drop.
     snap: Option<(Motion, Motion)>,
     dark: bool,
@@ -340,6 +346,7 @@ impl Dock {
             query: String::new(),
             drag: None,
             tab_drag: None,
+            anchor: 0.0,
             snap: None,
             dark,
             needs_paint: true,
@@ -374,6 +381,17 @@ impl Dock {
             self.style = style;
             self.apply_geometry();
         }
+    }
+
+    /// Ctrl+wheel: the icon tiles (or, in the list views, the cards) one step bigger or smaller.
+    fn resize_by(&mut self, steps: f32) -> Option<DockCmd> {
+        if self.icons() {
+            self.style.tile_size = (self.style.tile_size + 2.0 * steps).clamp(16.0, 96.0);
+        } else {
+            self.style.width = (self.style.width + 10.0 * steps).clamp(140.0, 520.0);
+        }
+        self.apply_geometry();
+        Some(DockCmd::Resized { tile_size: self.style.tile_size, width: self.style.width })
     }
 
     /// Slides the dock out (or tucks it away) without the pointer, e.g. from a hotkey.
@@ -604,9 +622,9 @@ impl Dock {
         let st = &self.style;
         let (w, h) = if self.icons() {
             let n = self.shown_tiles() as f32 + 1.0;
-            let column = n * st.tile_size + (n - 1.0) * TILE_GAP + SEPARATOR + 2.0 * TILE_PAD;
+            let column = n * st.tile_size + (n - 1.0) * self.style.tile_gap + SEPARATOR + 2.0 * self.style.tile_padding;
             let grow = st.tile_size * (st.magnify - 1.0) * 2.4;
-            let strip_w = st.tile_size + 2.0 * TILE_PAD;
+            let strip_w = st.tile_size + 2.0 * self.style.tile_padding;
             (
                 (LABEL_ROOM + st.tile_size * (st.magnify - 1.0) + strip_w + st.edge_gap + SHADOW) * s,
                 (column + grow + 2.0 * SHADOW) * s,
@@ -633,6 +651,7 @@ impl Dock {
         let x = if self.right() { pos.x + size.width as i32 - w as i32 } else { pos.x };
         let centre = pos.y + (size.height as f32 * self.style.position) as i32;
         let y = (centre - h as i32 / 2).clamp(pos.y, (pos.y + size.height as i32 - h as i32).max(pos.y));
+        self.anchor = (centre - y) as f32;
         if self.window.inner_size() != PhysicalSize::new(w, h) {
             let _ = self.window.request_inner_size(PhysicalSize::new(w, h));
         }
@@ -711,8 +730,11 @@ impl Dock {
 
     fn shown_tiles(&self) -> usize {
         let st = &self.style;
-        let fit = (self.monitor.1.height as f32 / self.scale() * 0.75 - 2.0 * TILE_PAD - SEPARATOR - st.tile_size)
-            / (st.tile_size + TILE_GAP);
+        let fit = (self.monitor.1.height as f32 / self.scale() * 0.75
+            - 2.0 * self.style.tile_padding
+            - SEPARATOR
+            - st.tile_size)
+            / (st.tile_size + self.style.tile_gap);
         self.tile_items().len().min(fit.max(1.0) as usize)
     }
 
@@ -724,7 +746,7 @@ impl Dock {
         let notes = self.tile_items();
         let hits: Vec<Hit> =
             notes.iter().take(self.shown_tiles()).map(|&i| Hit::Note(i)).chain(std::iter::once(Hit::New)).collect();
-        let gap = TILE_GAP * s;
+        let gap = self.style.tile_gap * s;
         let total = |sizes: &[f32]| sizes.iter().sum::<f32>() + gap * (sizes.len() as f32 - 1.0) + SEPARATOR * s;
         let base = vec![st.tile_size * s; hits.len()];
         let mut y = (h - total(&base)) / 2.0;
@@ -742,10 +764,10 @@ impl Dock {
             .iter()
             .map(|c| st.tile_size * s * (1.0 + (st.magnify - 1.0) * m * falloff(py - c, REACH * s)))
             .collect();
-        let strip_w = (st.tile_size + 2.0 * TILE_PAD) * s;
+        let strip_w = (st.tile_size + 2.0 * self.style.tile_padding) * s;
         let slide = (1.0 - self.open.value()) * (strip_w / s + st.edge_gap + 12.0) * s;
         let strip_right = w - st.edge_gap * s + slide;
-        let tile_right = strip_right - TILE_PAD * s;
+        let tile_right = strip_right - self.style.tile_padding * s;
         let mut y = (h - total(&sizes)) / 2.0;
         let top = y;
         let mut tiles = Vec::with_capacity(hits.len());
@@ -758,7 +780,12 @@ impl Dock {
             tiles.push(Tile { rect: (tile_right - size, y, *size, *size), hit: hits[i] });
             y += size + gap;
         }
-        let mut strip = (strip_right - strip_w, top - TILE_PAD * s, strip_w, y - gap - top + 2.0 * TILE_PAD * s);
+        let mut strip = (
+            strip_right - strip_w,
+            top - self.style.tile_padding * s,
+            strip_w,
+            y - gap - top + 2.0 * self.style.tile_padding * s,
+        );
         if !self.right() {
             let mirror = |r: (f32, f32, f32, f32)| (w - r.0 - r.2, r.1, r.2, r.3);
             strip = mirror(strip);
@@ -779,7 +806,7 @@ impl Dock {
         let s = self.scale();
         if self.icons() {
             let (strip, tiles, _) = self.tiles();
-            let half_gap = TILE_GAP * s / 2.0;
+            let half_gap = self.style.tile_gap * s / 2.0;
             return tiles
                 .iter()
                 .find(|t| {
@@ -857,7 +884,7 @@ impl Dock {
         let reach = st.trigger_width.max(st.tab_width + 4.0) * s;
         let band = st.trigger_height.max(st.tab_height) * s;
         let edge = if self.right() { x as f32 >= w - reach } else { (x as f32) <= reach };
-        edge && (y as f32 - h / 2.0).abs() <= band / 2.0
+        edge && (y as f32 - tab_centre(self.anchor, band, h)).abs() <= band / 2.0
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) -> Option<DockCmd> {
@@ -1255,6 +1282,13 @@ impl Dock {
                 if self.want_open && self.input.is_none() {
                     self.toggle_menu();
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } if resize_modifier_held() => {
+                let up = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y > 0.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+                };
+                return self.resize_by(if up { 1.0 } else { -1.0 });
             }
             WindowEvent::MouseWheel { delta, .. } if !self.icons() => {
                 let s = self.scale();
@@ -1832,6 +1866,8 @@ fn label_width_or(labels: &[(Buffer, cosmic_text::Color, (f32, f32), Clip)], fal
 /// What the tucked-away tab needs, copied out so it can be drawn inside the paint closure.
 struct TabParams {
     open: f32,
+    /// The tab's centre in the window (see `Dock::anchor`).
+    anchor: f32,
     right: bool,
     dark: bool,
     s: f32,
@@ -1843,6 +1879,7 @@ impl TabParams {
     fn of(d: &Dock) -> TabParams {
         TabParams {
             open: d.open.value().max(0.0),
+            anchor: d.anchor,
             right: d.right(),
             dark: d.dark,
             s: d.scale(),
@@ -1856,9 +1893,12 @@ impl TabParams {
         let st = &self.style;
         let (hw, hh) = (st.trigger_width * s, st.trigger_height * s);
         let hx = if self.right { w - hw } else { 0.0 };
+        // At the tab's own height, not the window's middle: near a screen edge the open dock's
+        // window is clamped, and a target that moved would leave the pointer over nothing.
+        let cy = tab_centre(self.anchor, hh, h);
         // Hover and grab target: alpha 1 is invisible but still receives the pointer (also while
         // the dock is open, so the tab can be dragged along the edge).
-        gfx::fill_rect(pm, hx, (h - hh) / 2.0, hw, hh, self.pal.text, 1);
+        gfx::fill_rect(pm, hx, cy - hh / 2.0, hw, hh, self.pal.text, 1);
         if self.open >= 1.0 {
             return;
         }
@@ -1867,11 +1907,36 @@ impl TabParams {
             return;
         }
         let tx = if self.right { w - tw - 2.0 * s } else { 2.0 * s };
-        if let Some(p) = gfx::rounded_rect(tx, (h - th) / 2.0, tw, th, tw / 2.0) {
+        if let Some(p) = gfx::rounded_rect(tx, tab_centre(self.anchor, th, h) - th / 2.0, tw, th, tw / 2.0) {
             let auto = if self.dark { Rgb(0xC8, 0xC8, 0xCC) } else { Rgb(0x70, 0x70, 0x76) };
             let alpha = st.tab_opacity as f32 * (1.0 - self.open).clamp(0.0, 1.0);
             gfx::fill_path(pm, &p, st.tab_color.unwrap_or(auto), alpha as u8);
         }
+    }
+}
+
+/// The tab's centre: at `anchor`, kept `size` clear of the window's top and bottom.
+fn tab_centre(anchor: f32, size: f32, height: f32) -> f32 {
+    anchor.clamp(size / 2.0, (height - size / 2.0).max(size / 2.0))
+}
+
+/// Ctrl (or ⌘ on macOS) is held right now. Asked of the OS directly: the dock rarely has
+/// keyboard focus, so it doesn't see modifier changes.
+fn resize_modifier_held() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+        unsafe { GetKeyState(VK_CONTROL as i32) < 0 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // NSEventModifierFlagControl | NSEventModifierFlagCommand
+        let flags: usize = unsafe { objc2::msg_send![objc2::class!(NSEvent), modifierFlags] };
+        flags & ((1 << 18) | (1 << 20)) != 0
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        false
     }
 }
 

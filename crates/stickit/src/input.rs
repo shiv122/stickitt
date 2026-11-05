@@ -50,3 +50,62 @@ pub fn debug() -> bool {
 pub fn inside(x: f64, y: f64, size: winit::dpi::PhysicalSize<u32>) -> bool {
     x >= 0.0 && y >= 0.0 && x < size.width as f64 && y < size.height as f64
 }
+
+/// Shows `icon` at once, besides `Window::set_cursor`. macOS applies a window's cursor only when
+/// the pointer next moves with no button held, so one set at the start of a drag would appear
+/// after the release, and one set at the release only once the pointer moves again. Elsewhere
+/// `Window::set_cursor` alone is enough.
+pub fn show_cursor(icon: winit::window::CursorIcon) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = icon;
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::rc::{Allocated, Retained};
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        use objc2_core_foundation::CGPoint;
+        use std::ffi::CString;
+
+        unsafe fn ns_string(s: &str) -> Option<Retained<AnyObject>> {
+            let c = CString::new(s).ok()?;
+            unsafe { msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()] }
+        }
+        /// WebKit's move cursor: the one winit shows for `CursorIcon::Move`.
+        unsafe fn load() -> Option<Retained<AnyObject>> {
+            let dir = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/\
+                       HIServices.framework/Versions/A/Resources/cursors/move";
+            unsafe {
+                let pdf = ns_string(&format!("{dir}/cursor.pdf"))?;
+                let image: Allocated<AnyObject> = msg_send![class!(NSImage), alloc];
+                let image: Option<Retained<AnyObject>> = msg_send![image, initByReferencingFile: &*pdf];
+                let image = image?;
+                let plist = ns_string(&format!("{dir}/info.plist"))?;
+                let info: Option<Retained<AnyObject>> =
+                    msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: &*plist];
+                let hot = |key: &str| -> f64 {
+                    let (Some(info), Some(key)) = (info.as_ref(), ns_string(key)) else { return 0.0 };
+                    let n: Option<Retained<AnyObject>> = msg_send![&**info, objectForKey: &*key];
+                    n.map_or(0.0, |n| msg_send![&*n, doubleValue])
+                };
+                let hotspot = CGPoint::new(hot("hotx"), hot("hoty"));
+                let cursor: Allocated<AnyObject> = msg_send![class!(NSCursor), alloc];
+                msg_send![cursor, initWithImage: &*image, hotSpot: hotspot]
+            }
+        }
+        thread_local! {
+            static MOVE: Option<Retained<AnyObject>> = unsafe { load() };
+        }
+        use winit::window::CursorIcon;
+        let cursor: Option<Retained<AnyObject>> = match icon {
+            CursorIcon::Move => MOVE.with(|c| c.clone()),
+            CursorIcon::Pointer => unsafe { msg_send![class!(NSCursor), pointingHandCursor] },
+            CursorIcon::Text => unsafe { msg_send![class!(NSCursor), IBeamCursor] },
+            CursorIcon::Grab => unsafe { msg_send![class!(NSCursor), openHandCursor] },
+            CursorIcon::Grabbing => unsafe { msg_send![class!(NSCursor), closedHandCursor] },
+            _ => unsafe { msg_send![class!(NSCursor), arrowCursor] },
+        };
+        if let Some(cursor) = cursor {
+            let _: () = unsafe { msg_send![&*cursor, set] };
+        }
+    }
+}

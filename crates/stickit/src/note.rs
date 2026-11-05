@@ -356,6 +356,10 @@ pub struct Note {
     full_size: LogicalSize<f64>,
     /// Where a press on the compact line started (a drag moves the note, a click opens it).
     press_at: Option<(f64, f64)>,
+    /// The note is being carried: the pointer's offset inside the window at the press. (The
+    /// window moves with the pointer itself rather than by a native drag, which on macOS would
+    /// force the arrow cursor and give no events until it ends.)
+    moving: Option<(f64, f64)>,
     /// "Delete note" was clicked once.
     confirm_delete: bool,
     /// Reminder menu state: typed text, chosen day (days from today) and repeat.
@@ -486,6 +490,7 @@ impl Note {
             view_dirty: rec.view == 1,
             full_size: LogicalSize::new(rec.size.0, rec.size.1),
             press_at: None,
+            moving: None,
             confirm_delete: false,
             remind_query: String::new(),
             remind_day: 0,
@@ -615,15 +620,24 @@ impl Note {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = (position.x, position.y);
+                if self.moving.is_some() {
+                    if crate::input::left_button_down() {
+                        self.carry(position.x, position.y);
+                    } else {
+                        // The release is on its way, or went to another window (macOS).
+                        self.moving = None;
+                        self.window.set_cursor(CursorIcon::Pointer);
+                        crate::input::show_cursor(CursorIcon::Pointer);
+                    }
+                    return Some(None);
+                }
                 if !self.hovered {
                     self.hovered = true;
                     self.needs_paint = true;
                 }
                 self.window.set_cursor(CursorIcon::Pointer);
-                if !crate::input::left_button_down() {
-                    self.press_at = None;
-                }
                 if !crate::input::inside(position.x, position.y, self.window.inner_size()) {
+                    self.press_at = None;
                     if std::mem::take(&mut self.hovered) {
                         self.needs_paint = true;
                     }
@@ -631,14 +645,24 @@ impl Note {
                 }
                 if let Some((px, py)) = self.press_at {
                     if (position.x - px).hypot(position.y - py) > 4.0 * self.scale() as f64 {
+                        // A press that moved starts a drag, unless its release was lost (macOS
+                        // can send it to another window). One that stays put waits for its
+                        // release, which makes the click.
                         self.press_at = None;
-                        let _ = self.window.drag_window();
+                        if crate::input::left_button_down() {
+                            self.moving = Some((px, py));
+                            self.window.set_cursor(CursorIcon::Move);
+                            crate::input::show_cursor(CursorIcon::Move);
+                        }
                     }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if *state == ElementState::Pressed {
                     self.press_at = Some(self.pointer);
+                } else if self.moving.take().is_some() {
+                    self.window.set_cursor(CursorIcon::Pointer);
+                    crate::input::show_cursor(CursorIcon::Pointer);
                 } else if self.press_at.take().is_some() {
                     self.expand();
                 }
@@ -1494,6 +1518,10 @@ impl Note {
                 }
                 self.drag_select = false;
                 self.hue_drag = false;
+                if self.moving.take().is_some() || matches!(self.zone(self.pointer.0, self.pointer.1), Zone::Bar) {
+                    self.window.set_cursor(CursorIcon::Default);
+                    crate::input::show_cursor(CursorIcon::Default);
+                }
                 if self.resizing.take().is_some() {
                     // The new size is saved with the next batch.
                     self.dirty = true;
@@ -2605,6 +2633,15 @@ impl Note {
         }
     }
 
+    /// Moves the window so the pointer keeps its offset from the press.
+    fn carry(&mut self, x: f64, y: f64) {
+        let Some((gx, gy)) = self.moving else { return };
+        if let Ok(pos) = self.window.outer_position() {
+            let to = PhysicalPosition::new(pos.x + (x - gx).round() as i32, pos.y + (y - gy).round() as i32);
+            self.window.set_outer_position(to);
+        }
+    }
+
     fn on_pointer_move(&mut self, x: f64, y: f64, shared: &mut Shared) {
         // A resize, selection or hue drag whose button is no longer held lost its release
         // (macOS can send it to another window): end it rather than follow the pointer.
@@ -2613,12 +2650,16 @@ impl Note {
                 self.dirty = true;
                 self.needs_paint = true;
             }
+            if self.moving.take().is_some() {
+                self.window.set_cursor(CursorIcon::Default);
+                crate::input::show_cursor(CursorIcon::Default);
+            }
             self.drag_select = false;
             self.hue_drag = false;
         }
         // macOS keeps sending moves to a focused window from anywhere on screen: outside the
         // note, it is simply not hovered.
-        let busy = self.resizing.is_some() || self.drag_select || self.hue_drag;
+        let busy = self.resizing.is_some() || self.moving.is_some() || self.drag_select || self.hue_drag;
         if !busy && !crate::input::inside(x, y, self.window.inner_size()) {
             if std::mem::take(&mut self.hovered) || self.hover.take().is_some() {
                 self.needs_paint = true;
@@ -2626,6 +2667,10 @@ impl Note {
             return;
         }
         self.pointer = (x, y);
+        if self.moving.is_some() {
+            self.carry(x, y);
+            return;
+        }
         if self.resizing.is_some() {
             self.resize_to(x, y, shared);
             return;
@@ -2711,7 +2756,10 @@ impl Note {
             }
             Zone::Button(a) => return self.act(a, shared),
             Zone::Bar => {
-                let _ = self.window.drag_window();
+                // The move cursor for as long as the note is carried; the release puts it back.
+                self.moving = Some((x, y));
+                self.window.set_cursor(CursorIcon::Move);
+                crate::input::show_cursor(CursorIcon::Move);
             }
             Zone::Text => {
                 let now = Instant::now();

@@ -37,6 +37,21 @@ fn data_dir() -> PathBuf {
     dir
 }
 
+/// Appends every panic (message and source location) to `path`, besides the usual stderr report.
+fn log_panics(path: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = writeln!(f, "{} {info}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+        }
+    }));
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut bench = None;
@@ -55,6 +70,8 @@ fn main() {
     }
 
     let data_dir = data_dir();
+    // A crash leaves its message in the data folder: a bundled app has no terminal to show it.
+    log_panics(data_dir.join("stickit.log"));
     let db_path = db_path.unwrap_or_else(|| data_dir.join("stickit.db"));
     // One copy per database; launching again just brings up the running one.
     let instance = if bench.is_some() {

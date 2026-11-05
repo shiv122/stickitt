@@ -46,6 +46,9 @@ const REACH: f32 = 115.0;
 const CASCADE: f32 = 0.035;
 const SHADOW: f32 = if surface::ALPHA { 26.0 } else { 0.0 };
 const CLOSE_DELAY: Duration = Duration::from_millis(320);
+/// Tucked away by a click, the strip settles under the still pointer with a flurry of leave/enter
+/// pairs (macOS); coming back sooner than this after leaving is not a return.
+const SETTLE: Duration = Duration::from_millis(200);
 /// A note is floated to the front only once the pointer rests on its card this long; sweeping
 /// across the stack would otherwise reshuffle every window it passes.
 const PEEK_DELAY: Duration = Duration::from_millis(140);
@@ -261,6 +264,11 @@ pub struct Dock {
     /// The tab being dragged along its edge: pointer's screen y and the position at the press,
     /// and whether it has moved yet (a press that doesn't move is a click).
     tab_drag: Option<(f64, f32, bool)>,
+    /// Tucked away by a click on the tab: hovering opens it again only once the pointer has
+    /// left and come back (macOS reports it entering the shrunken strip straight away).
+    rest: bool,
+    /// When the pointer last left while resting.
+    left_at: Option<Instant>,
     /// Where the tab sits inside the window (physical px from the top). The window is clamped to
     /// the screen, so near an edge the tab is not at its middle.
     anchor: f32,
@@ -346,6 +354,8 @@ impl Dock {
             query: String::new(),
             drag: None,
             tab_drag: None,
+            rest: false,
+            left_at: None,
             anchor: 0.0,
             snap: None,
             dark,
@@ -858,6 +868,7 @@ impl Dock {
         }
         self.want_open = open;
         if open {
+            self.rest = false;
             self.pending = Some(DockCmd::Opening);
             if !self.expanded {
                 self.expanded = true;
@@ -887,9 +898,36 @@ impl Dock {
         edge && (y as f32 - tab_centre(self.anchor, band, h)).abs() <= band / 2.0
     }
 
+    /// `(x, y)` is over the dock's visible part: the strip or card column, out to the screen
+    /// edge. The window is wider than that (label room, hover push, shadow); Windows lets the
+    /// pointer through its transparent part, but on macOS it still counts as inside, which kept
+    /// the dock out with the pointer inches away from it.
+    fn occupied(&self, x: f64, y: f64) -> bool {
+        if !self.expanded || self.on_tab(x, y) {
+            return true;
+        }
+        let st = &self.style;
+        let content = if self.icons() {
+            st.tile_size + 2.0 * st.tile_padding + st.tile_size * (st.magnify - 1.0)
+        } else {
+            st.width + st.hover_push
+        };
+        let depth = (st.edge_gap + content) * self.scale();
+        let w = self.window.inner_size().width as f32;
+        if self.right() {
+            x as f32 >= w - depth
+        } else {
+            x as f32 <= depth
+        }
+    }
+
     /// The pointer is no longer over the dock: tuck it away after a moment.
     fn pointer_left(&mut self) -> Option<DockCmd> {
         self.pointer = None;
+        self.press = None;
+        if self.rest {
+            self.left_at = Some(Instant::now());
+        }
         self.open_at = None;
         self.magnify.to(0.0);
         if self.want_open && self.input.is_none() {
@@ -904,13 +942,24 @@ impl Dock {
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) -> Option<DockCmd> {
-        // A press, drag or tab drag whose button is no longer held lost its release (macOS can
-        // send it to another window): finish it instead of letting the dock follow the pointer.
-        if !crate::input::left_button_down() {
-            self.press = None;
-            if let Some((_, _, moved)) = self.tab_drag.take() {
-                if moved {
-                    return Some(DockCmd::Moved { side: self.style.side, position: self.style.position });
+        let held = crate::input::left_button_down();
+        if !held {
+            // The button is up. A press that hasn't moved keeps waiting for its release: macOS
+            // reports a move at the same spot just before it, and the release makes the click.
+            // A press that moved, and any drag, lost its release (macOS can send it to another
+            // window): finish it instead of letting the dock follow the pointer.
+            if self.press.is_some_and(|((px, py), _)| (x - px).hypot(y - py) > DRAG_SLOP) {
+                self.press = None;
+            }
+            if let Some((start_y, _, moved)) = self.tab_drag {
+                let top = self.window.outer_position().map_or(0, |p| p.y) as f64;
+                if moved || (top + y - start_y).abs() > DRAG_SLOP * self.scale() as f64 {
+                    self.tab_drag = None;
+                    self.window.set_cursor(CursorIcon::Grab);
+                    crate::input::show_cursor(CursorIcon::Grab);
+                    if moved {
+                        return Some(DockCmd::Moved { side: self.style.side, position: self.style.position });
+                    }
                 }
             }
             if self.drag.is_some() {
@@ -918,9 +967,10 @@ impl Dock {
             }
         }
         // macOS keeps sending moves to a focused window from anywhere on screen; one outside the
-        // dock means the pointer left it.
+        // dock's visible part means the pointer left it.
         let dragging = self.drag.is_some() || self.tab_drag.is_some();
-        if !dragging && !crate::input::inside(x, y, self.window.inner_size()) {
+        let over = crate::input::inside(x, y, self.window.inner_size()) && self.occupied(x, y);
+        if !dragging && !over {
             return if self.pointer.is_some() { self.pointer_left() } else { None };
         }
         self.pointer = Some((x, y));
@@ -930,21 +980,23 @@ impl Dock {
             let dy = top + y - start_y;
             if moved || dy.abs() > DRAG_SLOP * self.scale() as f64 {
                 self.tab_drag = Some((start_y, start_pos, true));
-                self.window.set_cursor(CursorIcon::Grabbing);
+                self.window.set_cursor(CursorIcon::Move);
+                crate::input::show_cursor(CursorIcon::Move);
                 let height = self.monitor.1.height.max(1) as f32;
                 self.style.position = (start_pos + dy as f32 / height).clamp(0.05, 0.95);
                 self.apply_geometry();
             }
             return None;
         }
-        if self.drag.is_none() {
+        if held && self.drag.is_none() {
             if let Some(((px, py), _)) = self.press {
                 if (x - px).hypot(y - py) > DRAG_SLOP {
                     self.press = None;
                     self.drag = Some((px, py));
                     self.close_at = None;
                     self.hover = None;
-                    self.window.set_cursor(CursorIcon::Grabbing);
+                    self.window.set_cursor(CursorIcon::Move);
+                    crate::input::show_cursor(CursorIcon::Move);
                 }
             }
         }
@@ -957,7 +1009,7 @@ impl Dock {
             return None;
         }
         self.close_at = None;
-        if !self.want_open && self.open_at.is_none() {
+        if !self.want_open && !self.rest && self.open_at.is_none() {
             self.open_at = Some(Instant::now() + Duration::from_millis(self.style.open_delay_ms));
         }
         if self.want_open {
@@ -995,7 +1047,7 @@ impl Dock {
             Some(Hit::Input) | None => CursorIcon::Default,
             Some(_) => CursorIcon::Pointer,
         };
-        self.window.set_cursor(if self.drag.is_some() { CursorIcon::Grabbing } else { cursor });
+        self.window.set_cursor(if self.drag.is_some() { CursorIcon::Move } else { cursor });
         if hover == self.hover {
             return None;
         }
@@ -1092,6 +1144,8 @@ impl Dock {
     /// Drops a dragged dock: nearest left/right edge of the monitor under the pointer.
     fn drop_dock(&mut self) -> Option<DockCmd> {
         let (gx, gy) = self.drag.take()?;
+        self.window.set_cursor(CursorIcon::Default);
+        crate::input::show_cursor(CursorIcon::Default);
         let pos = self.window.outer_position().ok()?;
         let (px, py) = (pos.x + gx as i32, pos.y + gy as i32);
         if let Some(m) = self.window.available_monitors().find(|m| {
@@ -1257,13 +1311,15 @@ impl Dock {
             {
                 let (_, _, moved) = self.tab_drag.take()?;
                 self.window.set_cursor(CursorIcon::Grab);
+                crate::input::show_cursor(CursorIcon::Grab);
                 if moved {
                     return Some(DockCmd::Moved { side: self.style.side, position: self.style.position });
                 }
                 // A click on the tab opens (or tucks away) the dock.
                 self.start(!self.want_open);
+                self.rest = !self.want_open;
+                self.left_at = None;
             }
-            WindowEvent::CursorLeft { .. } if self.tab_drag.is_some() => {}
             WindowEvent::ThemeChanged(theme) => {
                 self.dark = *theme == Theme::Dark;
                 self.needs_paint = true;
@@ -1274,13 +1330,25 @@ impl Dock {
             }
             WindowEvent::CursorEntered { .. } => {
                 self.close_at = None;
-                if !self.want_open && self.open_at.is_none() {
+                if self.rest && self.left_at.is_some_and(|t| t.elapsed() >= SETTLE) {
+                    self.rest = false;
+                }
+                if !self.want_open && !self.rest && self.open_at.is_none() {
                     self.open_at = Some(Instant::now() + Duration::from_millis(self.style.open_delay_ms));
                 }
             }
             WindowEvent::CursorMoved { position, .. } => return self.pointer_moved(position.x, position.y),
-            WindowEvent::CursorLeft { .. } if self.drag.is_some() => {}
-            WindowEvent::CursorLeft { .. } => return self.pointer_left(),
+            // A drag carries on outside the window while the button is held. Without it the
+            // drag lost its release, so it ends here and the pointer has left.
+            WindowEvent::CursorLeft { .. }
+                if (self.drag.is_some() || self.tab_drag.is_some()) && crate::input::left_button_down() => {}
+            WindowEvent::CursorLeft { .. } => {
+                let slid = self.tab_drag.take().is_some_and(|(_, _, moved)| moved);
+                let dropped = if self.drag.is_some() { self.drop_dock() } else { None };
+                let left = self.pointer_left();
+                let moved = || DockCmd::Moved { side: self.style.side, position: self.style.position };
+                return dropped.or_else(|| slid.then(moved)).or(left);
+            }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }
                 if self.drag.is_some() =>
             {

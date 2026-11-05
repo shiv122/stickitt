@@ -71,16 +71,46 @@ const EXTRA_HUES: [(f32, f32); 9] = [
     (215.0, 0.15), // slate
 ];
 
+/// Colours from the app icon, after the hue presets: Cobalt (the page curl and pin), Grape and
+/// Aqua (the tabs) and Lavender (the note). Light-mode accents are deepened for readable text.
+const BRAND: [Tint; 4] = [
+    Tint {
+        light: (Rgb(0x45, 0x5F, 0xF3), Rgb(0xEC, 0xEF, 0xFE)),
+        dark: (Rgb(0x6F, 0x86, 0xFF), Rgb(0x1E, 0x25, 0x50)),
+    },
+    Tint {
+        light: (Rgb(0x7A, 0x2E, 0xE6), Rgb(0xF3, 0xEC, 0xFF)),
+        dark: (Rgb(0xA6, 0x6B, 0xFF), Rgb(0x2E, 0x1F, 0x4D)),
+    },
+    Tint {
+        light: (Rgb(0x0A, 0x9F, 0xC2), Rgb(0xE3, 0xF7, 0xFC)),
+        dark: (Rgb(0x2C, 0xC8, 0xEE), Rgb(0x12, 0x38, 0x4A)),
+    },
+    Tint {
+        light: (Rgb(0x6B, 0x78, 0xE8), Rgb(0xE6, 0xE9, 0xFE)),
+        dark: (Rgb(0xAE, 0xB8, 0xFF), Rgb(0x2A, 0x2D, 0x52)),
+    },
+];
+
 /// Number of preset colours; a note's colour is a preset index or `CUSTOM + hue°`.
-pub const PRESETS: u16 = (TINTS.len() + EXTRA_HUES.len()) as u16;
+pub const PRESETS: u16 = (TINTS.len() + EXTRA_HUES.len() + BRAND.len()) as u16;
+/// The colours new notes take in turn (`[notes] default_color = cycle`): the app icon's first,
+/// then well-spread presets. Lavender, Cobalt, Aqua, Grape, Yellow, Pink, Green, Orange, Blue,
+/// Teal, Rose, Mint.
+pub const ROTATION: [u16; 12] = [21, 18, 20, 19, 0, 1, 3, 6, 2, 9, 13, 16];
 pub const CUSTOM: u16 = 1000;
 /// Saturation used for custom hues.
 const CUSTOM_SATURATION: f32 = 0.75;
 
 pub const PRESET_NAMES: [&str; PRESETS as usize] = [
     "Yellow", "Pink", "Blue", "Green", "Purple", "Gray", "Orange", "Red", "Brown", "Teal", "Sky", "Indigo", "Violet",
-    "Rose", "Amber", "Lime", "Mint", "Slate",
+    "Rose", "Amber", "Lime", "Mint", "Slate", "Cobalt", "Grape", "Aqua", "Lavender",
 ];
+
+/// A preset by its name (any case), e.g. "lavender".
+pub fn preset_named(name: &str) -> Option<u16> {
+    PRESET_NAMES.iter().position(|n| n.eq_ignore_ascii_case(name.trim())).map(|i| i as u16)
+}
 
 pub fn color_name(color: u16) -> String {
     match PRESET_NAMES.get(color as usize) {
@@ -154,6 +184,9 @@ pub fn tint(color: u16, dark: bool) -> (Rgb, Rgb) {
     if let Some(&(h, s)) = EXTRA_HUES.get(i.wrapping_sub(TINTS.len())) {
         return from_hue(h, s, dark);
     }
+    if let Some(t) = BRAND.get(i.wrapping_sub(TINTS.len() + EXTRA_HUES.len())) {
+        return if dark { t.dark } else { t.light };
+    }
     from_hue(custom_hue(color).unwrap_or(0.0), CUSTOM_SATURATION, dark)
 }
 
@@ -202,6 +235,13 @@ mod tests {
         assert_eq!(hsl(120.0, 1.0, 0.5), Rgb(0, 255, 0));
         assert_eq!(tint(2, false), (Rgb(0x33, 0x7E, 0xA9), Rgb(0xE7, 0xF3, 0xF8)));
         assert_eq!(color_name(9), "Teal");
+        // The rotation starts with the app icon's colours and repeats none.
+        let names: Vec<String> = ROTATION.iter().map(|&c| color_name(c)).collect();
+        assert_eq!(names[..4], ["Lavender", "Cobalt", "Aqua", "Grape"]);
+        assert!(ROTATION.iter().all(|&c| c < PRESETS));
+        assert!((1..ROTATION.len()).all(|i| !ROTATION[..i].contains(&ROTATION[i])));
+        assert_eq!(preset_named("cobalt"), Some(18));
+        assert_eq!(tint(18, false).0, Rgb(0x45, 0x5F, 0xF3));
         assert_eq!(color_name(CUSTOM + 200), "Custom 200°");
         assert_eq!(custom_hue(CUSTOM + 200), Some(200.0));
         assert_eq!(custom_hue(3), None);

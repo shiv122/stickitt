@@ -37,7 +37,9 @@ jobs:
   macos:
     name: Build macOS app
     needs: [version, ci]
-    runs-on: macos-latest
+    # Intel runner (GitHub's arm64 macOS pool is often short of capacity); the universal app's
+    # Apple Silicon half is cross-compiled.
+    runs-on: macos-15-intel
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:

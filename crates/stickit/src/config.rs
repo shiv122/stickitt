@@ -118,6 +118,7 @@ pub struct NoteStyle {
     /// Colour of new notes.
     pub default_color: NewNoteColor,
     pub compact: CompactStyle,
+    pub fade: FadeStyle,
 }
 
 /// The colour a new note gets.
@@ -148,6 +149,34 @@ pub struct CompactStyle {
     pub show_progress: bool,
     /// An opened compact note folds back to one line when you click elsewhere.
     pub collapse_on_blur: bool,
+}
+
+/// Notes fading while you aren't using them, so they cover less of what is behind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FadeStyle {
+    pub enabled: bool,
+    /// Seconds without focus or the pointer before a note fades.
+    pub after: f32,
+    /// How visible a faded note stays (0..1).
+    pub opacity: f32,
+    pub which: FadeWhich,
+    /// Compact (one-line) notes fade too.
+    pub compact: bool,
+}
+
+/// Which notes fade when idle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FadeWhich {
+    /// Only "always on top" notes: the ones that sit over your work.
+    OnTop,
+    /// Every note.
+    All,
+}
+
+impl Default for FadeStyle {
+    fn default() -> Self {
+        Self { enabled: false, after: 30.0, opacity: 0.35, which: FadeWhich::OnTop, compact: true }
+    }
 }
 
 impl Default for CompactStyle {
@@ -199,6 +228,7 @@ impl Default for NoteStyle {
             appear_scale: 0.97,
             default_color: NewNoteColor::Cycle,
             compact: CompactStyle::default(),
+            fade: FadeStyle::default(),
         }
     }
 }
@@ -210,12 +240,21 @@ pub struct ReminderSettings {
     pub times: Vec<chrono::NaiveTime>,
     /// "In 20m"-style choices, in seconds.
     pub soon: Vec<i64>,
+    /// Minutes the reminder menu's fine-tune buttons move the time by.
+    pub minute_step: u32,
+    /// A short sound when a reminder rings.
+    pub sound: bool,
 }
 
 impl Default for ReminderSettings {
     fn default() -> Self {
         let t = |h| chrono::NaiveTime::from_hms_opt(h, 0, 0).unwrap_or_default();
-        Self { times: vec![t(9), t(12), t(15), t(18), t(21)], soon: vec![20 * 60, 3600, 3 * 3600] }
+        Self {
+            times: vec![t(9), t(12), t(15), t(18), t(21)],
+            soon: vec![20 * 60, 3600, 3 * 3600],
+            minute_step: 5,
+            sound: true,
+        }
     }
 }
 
@@ -310,6 +349,7 @@ actions!(NoteAction {
     Italic = "italic", "CmdOrCtrl+I", "Italic";
     InlineCode = "inline_code", "CmdOrCtrl+E", "Inline code";
     Strikethrough = "strikethrough", "CmdOrCtrl+Shift+X", "Strikethrough";
+    Highlight = "highlight", "CmdOrCtrl+Shift+H", "Highlight (==text==, or ==red:text== for a colour)";
     AddReminder = "add_reminder", "CmdOrCtrl+R", "Set a reminder (day, time, repeat)";
     ClearReminder = "clear_reminder", "CmdOrCtrl+Shift+R", "Clear the reminder";
     ZoomIn = "zoom_in", "CmdOrCtrl+Equal", "Larger text";
@@ -377,6 +417,10 @@ const SECTIONS: &[(&str, &str)] = &[
     (
         "notes.compact",
         "Compact view (note menu or Ctrl+Shift+M): the note as one line, icon and title. Click it to open it.",
+    ),
+    (
+        "notes.fade",
+        "Fading idle notes: after a while without focus or the pointer, a note turns see-through. Point at it to bring it back.",
     ),
     ("dock", "The dock on the screen edge: where it sits and when it opens."),
     ("dock.list", "The list views (compact and detailed): the cards."),
@@ -530,6 +574,44 @@ const SETTINGS: &[Setting] = &[
         get: |c| c.notes.compact.collapse_on_blur.to_string(),
         set: |c, v| c.notes.compact.collapse_on_blur = flag(v).unwrap_or(c.notes.compact.collapse_on_blur),
     },
+    // [notes.fade]
+    Setting {
+        section: "notes.fade",
+        key: "enabled",
+        doc: "fade notes you haven't used for a while",
+        get: |c| c.notes.fade.enabled.to_string(),
+        set: |c, v| c.notes.fade.enabled = flag(v).unwrap_or(c.notes.fade.enabled),
+    },
+    num_setting!(
+        "notes.fade",
+        "after",
+        1.0,
+        3600.0,
+        notes.fade.after,
+        "seconds without focus or the pointer before a note fades"
+    ),
+    num_setting!("notes.fade", "opacity", 0.05, 1.0, notes.fade.opacity, "how visible a faded note stays, 0.05 - 1"),
+    Setting {
+        section: "notes.fade",
+        key: "which",
+        doc: "on_top = only always-on-top notes, all = every note",
+        get: |c| match c.notes.fade.which {
+            FadeWhich::OnTop => "on_top".into(),
+            FadeWhich::All => "all".into(),
+        },
+        set: |c, v| match v.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "on_top" | "top" | "ontop" => c.notes.fade.which = FadeWhich::OnTop,
+            "all" | "every" => c.notes.fade.which = FadeWhich::All,
+            _ => {}
+        },
+    },
+    Setting {
+        section: "notes.fade",
+        key: "compact",
+        doc: "compact (one-line) notes fade too",
+        get: |c| c.notes.fade.compact.to_string(),
+        set: |c, v| c.notes.fade.compact = flag(v).unwrap_or(c.notes.fade.compact),
+    },
     // [dock]
     Setting {
         section: "dock",
@@ -681,6 +763,24 @@ const SETTINGS: &[Setting] = &[
                 c.reminders.soon = soon;
             }
         },
+    },
+    Setting {
+        section: "reminders",
+        key: "minute_step",
+        doc: "minutes the -/+ buttons move the time by (1 - 60)",
+        get: |c| c.reminders.minute_step.to_string(),
+        set: |c, v| {
+            if let Some(n) = num(v, 1.0, 60.0) {
+                c.reminders.minute_step = n.round() as u32;
+            }
+        },
+    },
+    Setting {
+        section: "reminders",
+        key: "sound",
+        doc: "play a short sound when a reminder rings",
+        get: |c| c.reminders.sound.to_string(),
+        set: |c, v| c.reminders.sound = flag(v).unwrap_or(c.reminders.sound),
     },
     // [desktops]
     Setting {
@@ -991,6 +1091,19 @@ mod tests {
         // Anything unreadable keeps the defaults.
         let bad = Config::parse("[reminders]\ntimes = 8am, lunch\nsoon =\n");
         assert_eq!(bad.reminders, ReminderSettings::default());
+    }
+
+    #[test]
+    fn fade_settings() {
+        assert!(!Config::defaults().notes.fade.enabled, "fading is opt-in");
+        let cfg = Config::parse("[notes.fade]\nenabled = yes\nafter = 12\nopacity = 0.5\nwhich = all\ncompact = off\n");
+        let want = FadeStyle { enabled: true, after: 12.0, opacity: 0.5, which: FadeWhich::All, compact: false };
+        assert_eq!(cfg.notes.fade, want);
+        assert_eq!(Config::parse(&cfg.render()).notes.fade, want);
+        // Out of range values are clamped; unknown words keep the default.
+        let cfg = Config::parse("[notes.fade]\nafter = 0\nopacity = 3\nwhich = sometimes\n");
+        assert_eq!((cfg.notes.fade.after, cfg.notes.fade.opacity, cfg.notes.fade.which), (1.0, 1.0, FadeWhich::OnTop));
+        assert_eq!(Config::parse("[notes.fade]\nwhich = On-Top\n").notes.fade.which, FadeWhich::OnTop);
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub enum SlashKind {
     /// Replaces the line's block syntax with this prefix.
     Prefix(&'static str),
     CodeBlock,
+    /// A two-column table to fill in.
+    Table,
     Divider,
     /// Starts an `@` reminder token.
     Reminder,
@@ -85,7 +87,7 @@ pub struct SlashItem {
     pub kind: SlashKind,
 }
 
-pub const SLASH: [SlashItem; 12] = [
+pub const SLASH: [SlashItem; 13] = [
     SlashItem { label: "Text", tile: "T", aliases: "plain paragraph", kind: SlashKind::Text },
     SlashItem {
         label: "To-do list",
@@ -99,6 +101,7 @@ pub const SLASH: [SlashItem; 12] = [
     SlashItem { label: "Bulleted list", tile: "•", aliases: "bullet unordered ul", kind: SlashKind::Prefix("- ") },
     SlashItem { label: "Numbered list", tile: "1.", aliases: "number ordered ol", kind: SlashKind::Prefix("1. ") },
     SlashItem { label: "Quote", tile: "❝", aliases: "blockquote callout", kind: SlashKind::Prefix("> ") },
+    SlashItem { label: "Table", tile: "▦", aliases: "table grid columns rows", kind: SlashKind::Table },
     SlashItem { label: "Code", tile: "</>", aliases: "code block snippet", kind: SlashKind::CodeBlock },
     SlashItem { label: "Divider", tile: "—", aliases: "hr line separator rule", kind: SlashKind::Divider },
     SlashItem { label: "Reminder", tile: "⏰", aliases: "remind alarm time date due", kind: SlashKind::Reminder },

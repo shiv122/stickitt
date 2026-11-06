@@ -57,6 +57,50 @@ impl LineInfo {
     }
 }
 
+/// A table row (`| a | b |`): the byte offsets of its column dividers. A `|` inside inline
+/// code or escaped as `\|` is text, not a divider.
+pub fn table_pipes(line: &str) -> Option<Vec<usize>> {
+    if !line.trim_start().starts_with('|') {
+        return None;
+    }
+    let b = line.as_bytes();
+    let mut pipes = Vec::new();
+    let mut code = false;
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'`' => code = !code,
+            b'|' if !code && (i == 0 || b[i - 1] != b'\\') => pipes.push(i),
+            _ => {}
+        }
+    }
+    (pipes.len() >= 2).then_some(pipes)
+}
+
+/// The line under a table's header: `| --- | :---: |`.
+pub fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// A row's cells: the text between dividers (and after the last one, if any), trimmed.
+pub fn table_cells(line: &str, pipes: &[usize]) -> Vec<Range<usize>> {
+    let mut cells = Vec::new();
+    let trim = |r: Range<usize>| {
+        let s = &line[r.clone()];
+        let start = r.start + (s.len() - s.trim_start().len());
+        let end = r.end - (s.len() - s.trim_end().len());
+        start..end.max(start)
+    };
+    for w in pipes.windows(2) {
+        cells.push(trim(w[0] + 1..w[1]));
+    }
+    let last = *pipes.last().unwrap_or(&0) + 1;
+    if last < line.len() && !line[last..].trim().is_empty() {
+        cells.push(trim(last..line.len()));
+    }
+    cells
+}
+
 pub fn line_info(line: &str) -> LineInfo {
     let trimmed = line.trim_start_matches([' ', '\t']);
     let indent = line.len() - trimmed.len();
@@ -93,6 +137,57 @@ pub fn line_info(line: &str) -> LineInfo {
         info.checkbox = Some((info.marker_end, rest[1] != b' '));
     }
     info
+}
+
+/// Colours a highlight can name, as in `==red:text==` (plain `==text==` is the first).
+pub const HIGHLIGHTS: [&str; 9] = ["yellow", "gray", "brown", "orange", "green", "blue", "purple", "pink", "red"];
+
+/// A `==text==` or `==red:text==` highlight: where its text and its syntax are (byte ranges of
+/// the whole text), and its colour (an index into `HIGHLIGHTS`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Highlight {
+    pub text: Range<usize>,
+    pub open: Range<usize>,
+    pub close: Range<usize>,
+    pub color: usize,
+}
+
+/// Every highlight in `text`; each stays within one line.
+pub fn highlights(text: &str) -> Vec<Highlight> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for line in text.split('\n') {
+        let mut i = 0;
+        while let Some(at) = line[i..].find("==").map(|k| i + k) {
+            let from = at + 2;
+            let Some(len) = line[from..].find("==") else { break };
+            let to = from + len;
+            let inner = &line[from..to];
+            if inner.trim().is_empty() || inner.starts_with(' ') || inner.ends_with(' ') {
+                i = from;
+                continue;
+            }
+            // An optional colour: `red:`, then the text.
+            let (color, skip) = match inner.split_once(':') {
+                Some((name, rest)) if !rest.trim().is_empty() => {
+                    match HIGHLIGHTS.iter().position(|h| h.eq_ignore_ascii_case(name)) {
+                        Some(c) => (c, name.len() + 1 + (rest.len() - rest.trim_start().len())),
+                        None => (0, 0),
+                    }
+                }
+                _ => (0, 0),
+            };
+            out.push(Highlight {
+                text: base + from + skip..base + to,
+                open: base + at..base + from + skip,
+                close: base + to..base + to + 2,
+                color,
+            });
+            i = to + 2;
+        }
+        base += line.len() + 1;
+    }
+    out
 }
 
 /// Per-byte style flags for `text`.
@@ -263,6 +358,31 @@ fn find_closer(b: &[u8], from: usize, to: usize, c: u8, dl: usize) -> Option<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn highlights_with_and_without_colour() {
+        let text = "a ==big== and ==red:urgent== but == not == or ==blue:==\nx ==sky:y==";
+        let found: Vec<(&str, &str, usize)> =
+            highlights(text).iter().map(|h| (&text[h.text.clone()], &text[h.open.clone()], h.color)).collect();
+        assert_eq!(found, [("big", "==", 0), ("urgent", "==red:", 8), ("blue:", "==", 0), ("sky:y", "==", 0)]);
+    }
+
+    #[test]
+    fn tables() {
+        let row = "| Deal | Stage | `a|b` |";
+        let pipes = table_pipes(row).unwrap();
+        assert_eq!(pipes.len(), 4, "the pipe inside code is text");
+        let cells: Vec<&str> = table_cells(row, &pipes).into_iter().map(|r| &row[r]).collect();
+        assert_eq!(cells, ["Deal", "Stage", "`a|b`"]);
+        // No trailing divider: the last cell runs to the end of the line.
+        let row = "| a |  b";
+        let cells: Vec<&str> = table_cells(row, &table_pipes(row).unwrap()).into_iter().map(|r| &row[r]).collect();
+        assert_eq!(cells, ["a", "b"]);
+        assert!(table_pipes("no | table").is_none());
+        assert!(table_pipes("| lonely").is_none());
+        assert!(is_table_separator("| --- | :--: |"));
+        assert!(!is_table_separator("| a | b |"));
+    }
 
     #[test]
     fn checklist_line() {

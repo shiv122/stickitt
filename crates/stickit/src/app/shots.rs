@@ -27,7 +27,7 @@ struct Demo {
     size: (f64, f64),
 }
 
-const DEMOS: [Demo; 6] = [
+const DEMOS: [Demo; 7] = [
     Demo {
         icon: "🧳",
         body: "# Weekend trip\n- [x] Book the train\n- [x] Find a place to stay\n\
@@ -77,6 +77,16 @@ const DEMOS: [Demo; 6] = [
         compact: false,
         size: (280.0, 200.0),
     },
+    Demo {
+        icon: "💼",
+        body: "# Q3 pipeline\nReview with **Dana** on Friday\n| Deal | Stage | Value |\n| --- | --- | --- |\n\
+               | Acme Corp | ==blue:Proposal== | $48k |\n| Brightline | ==green:Won== | $61k |\n\
+               | Kestrel Labs | ==yellow:Discovery== | $15k |\n| Novatek | ==red:At risk== | $9.8k |",
+        color: "Amber",
+        work: true,
+        compact: false,
+        size: (380.0, 330.0),
+    },
 ];
 
 #[derive(Clone, Copy)]
@@ -89,12 +99,14 @@ enum Subject {
     Dock(View, bool),
 }
 
-const SCENES: [(&str, Subject); 9] = [
+const SCENES: [(&str, Subject); 11] = [
     ("note", Subject::Note(0, None)),
     ("note-menu", Subject::Note(0, Some("more"))),
     ("note-reminder", Subject::Note(0, Some("remind"))),
     ("note-colors", Subject::Note(0, Some("colors"))),
     ("note-window", Subject::Note(0, Some("window"))),
+    ("note-table", Subject::Note(6, None)),
+    ("note-ringing", Subject::Note(0, Some("ring"))),
     ("compact", Subject::Compact),
     ("dock", Subject::Dock(View::Detailed, false)),
     ("dock-icons", Subject::Dock(View::Icons, false)),

@@ -898,7 +898,7 @@ impl ApplicationHandler<UserEvent> for App {
         let mut dirty = false;
         for note in self.notes.values_mut() {
             if note.due(ts) {
-                note.ring();
+                note.ring(self.shared.config.reminders.sound);
             }
             if let Some(t) = note.tick(now) {
                 wake(t);

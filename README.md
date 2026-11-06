@@ -75,6 +75,21 @@ quotes, `` ` `` code and links. Type `/` at the start of a line for a menu of bl
 `:name:` for an emoji. Click a to-do's box (or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to tick it.
 <kbd>Ctrl</kbd>+<kbd>=</kbd> and <kbd>Ctrl</kbd>+<kbd>-</kbd> zoom the text.
 
+Highlight words with `==text==` for a soft yellow badge, or name a colour: `==green:On track==`,
+`==red:Blocked==` (gray, brown, orange, yellow, green, blue, purple, pink, red).
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> highlights the selection.
+
+Tables are drawn as a grid, with a bold header and columns that line up. Write them in the usual
+Markdown way, or pick **Table** from the `/` menu; while the caret is in a table it shows as
+plain text so it is easy to edit.
+
+```
+| Deal       | Stage    | Value |
+| ---------- | -------- | ----- |
+| Acme Corp  | Proposal | $48k  |
+| Brightline | **Won**  | $61k  |
+```
+
 Hover a note to show its controls along the top:
 
 | Control | What it does |
@@ -118,15 +133,17 @@ second click so it can't happen by accident (`confirm_delete`).
 ### Reminders
 
 Click the clock (or press <kbd>Ctrl</kbd>+<kbd>R</kbd>) to set one: a quick "in 20 minutes",
-or a day of the coming week, a time and a repeat (once, daily, weekdays, weekly). You can also
-type the time in the reminder box, or straight into the note:
+or a day of the coming week, a time and a repeat (once, daily, weekdays, weekly). Under the
+times, **−1h −5m [time] +5m +1h** sets any time to the minute: step it, then click the time. You
+can also type the time in the reminder box, or straight into the note:
 
 ```
 @3pm   @in 45m   @fri 9am   @tomorrow at 2pm   @daily 8am   @weekdays 9am   @every mon 10am
 ```
 
-When it is due the note jumps to the front, wiggles and gets a red outline until you snooze
-or dismiss it.
+When it is due the note jumps to the front with a short chime, and glows red until you snooze it
+(**10m**, **1h**) or mark it **Done**. It wiggles when it starts, again a few seconds later, and
+then every 45 seconds.
 
 <p align="center">
   <picture>
@@ -214,6 +231,7 @@ sends Stick-itt to the tray rather than quitting.
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>,</kbd> | Settings | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd> / <kbd>C</kbd> | Pick / next colour |
 | | | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> | Pick an icon |
 | | | <kbd>Ctrl</kbd>+<kbd>B</kbd> <kbd>I</kbd> <kbd>E</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> | Bold, italic, code, strikethrough |
+| | | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> | Highlight |
 | | | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Tick a to-do |
 | | | <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>D</kbd> | Hide / delete |
 
@@ -302,6 +320,22 @@ Violet, Rose, Amber, Lime, Mint, Slate, Cobalt, Grape, Aqua, Lavender.
 </details>
 
 <details>
+<summary><b>[notes.fade]</b>: fade notes you aren't using</summary>
+
+A faded note comes back to full strength as soon as you point at it. Notes you are typing in,
+notes with a menu open and ringing reminders never fade.
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | `false` | Turn fading on |
+| `after` | `30` | Seconds without focus or the pointer before a note fades |
+| `opacity` | `0.35` | How visible a faded note stays, `0.05`–`1` |
+| `which` | `on_top` | `on_top`: only always-on-top notes; `all`: every note |
+| `compact` | `true` | Compact (one-line) notes fade too |
+
+</details>
+
+<details>
 <summary><b>[dock]</b>, <b>[dock.list]</b>, <b>[dock.icons]</b>, <b>[dock.tab]</b>: the dock</summary>
 
 | Key | Default | |
@@ -333,6 +367,8 @@ Violet, Rose, Amber, Lime, Mint, Slate, Cobalt, Grape, Aqua, Lavender.
 |---|---|---|
 | `[reminders]` `times` | `9am, 12pm, 3pm, 6pm, 9pm` | Times offered in the reminder menu (up to 6) |
 | `soon` | `20m, 1h, 3h` | The "in …" choices (up to 4) |
+| `minute_step` | `5` | Minutes the −/+ buttons move the time by (`1`–`60`) |
+| `sound` | `true` | A short sound when a reminder rings |
 | `[desktops]` `per_desktop` | `true` | Notes stay on their own desktop or Space; `false` shows them on all |
 | `dock_shows_other_desktops` | `false` | The dock also lists notes from other desktops; pick one to bring it here |
 | `profile_per_desktop` | `true` | Each desktop remembers its own profile |
@@ -352,7 +388,7 @@ Global: `new_note`, `paste_as_note`, `toggle_notes`, `open_dock`, `next_profile`
 
 In a note: `new_note`, `close_note`, `delete_note`, `quit`, `cycle_mode`, `pick_color`,
 `next_color`, `pick_icon`, `move_to_list`, `toggle_compact`, `toggle_todo`, `bold`, `italic`,
-`inline_code`, `strikethrough`, `add_reminder`, `clear_reminder`, `zoom_in`, `zoom_out`,
+`inline_code`, `strikethrough`, `highlight`, `add_reminder`, `clear_reminder`, `zoom_in`, `zoom_out`,
 `zoom_reset`, `open_settings`.
 
 </details>

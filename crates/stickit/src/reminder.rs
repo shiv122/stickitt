@@ -139,7 +139,7 @@ impl Reminder {
     }
 }
 
-fn local(ts: i64) -> DateTime<Local> {
+pub fn local(ts: i64) -> DateTime<Local> {
     Local.timestamp_opt(ts, 0).single().unwrap_or_else(Local::now)
 }
 
@@ -178,6 +178,22 @@ pub fn span(text: &str) -> Option<i64> {
     let words: Vec<String> = text.split_whitespace().map(|w| w.to_ascii_lowercase()).collect();
     let w: Vec<&str> = words.iter().map(String::as_str).collect();
     duration(&w).filter(|(_, n)| *n == w.len()).map(|(s, _)| s)
+}
+
+/// A starting time for the reminder menu's fine-tune row: an hour from now, rounded up to a
+/// multiple of `step` minutes.
+pub fn suggested_time(now: DateTime<Local>, step: u32) -> NaiveTime {
+    use chrono::Timelike;
+    let step = step.clamp(1, 60);
+    let later = now.time().overflowing_add_signed(Duration::minutes(60)).0;
+    let minutes = later.hour() * 60 + later.minute();
+    let rounded = minutes.div_ceil(step) * step % (24 * 60);
+    NaiveTime::from_hms_opt(rounded / 60, rounded % 60, 0).unwrap_or(later)
+}
+
+/// `time` moved by `minutes` (wrapping around midnight).
+pub fn nudge(time: NaiveTime, minutes: i64) -> NaiveTime {
+    time.overflowing_add_signed(Duration::minutes(minutes)).0
 }
 
 /// `offset` days from today at `time`, if that is still ahead.
@@ -490,6 +506,18 @@ mod tests {
         assert_eq!(hm(due("wed").0), (11, 9, 0)); // same weekday → next week
         assert_eq!(hm(due("tonight").0), (4, 20, 0));
         assert_eq!(hm(due("2026-12-01 10:15").0), (1, 10, 15));
+    }
+
+    #[test]
+    fn fine_tune_times() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        assert_eq!(nudge(t(9, 0), -5), t(8, 55));
+        assert_eq!(nudge(t(23, 30), 60), t(0, 30));
+        // An hour from 10:00, on the step.
+        assert_eq!(suggested_time(now(), 5), t(11, 0));
+        assert_eq!(suggested_time(now() + Duration::minutes(7), 5), t(11, 10));
+        assert_eq!(suggested_time(now() + Duration::minutes(7), 15), t(11, 15));
+        assert_eq!(suggested_time(now() + Duration::minutes(7), 1), t(11, 7));
     }
 
     #[test]

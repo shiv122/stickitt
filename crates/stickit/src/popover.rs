@@ -87,7 +87,7 @@ pub struct SlashItem {
     pub kind: SlashKind,
 }
 
-pub const SLASH: [SlashItem; 13] = [
+pub const SLASH: [SlashItem; 14] = [
     SlashItem { label: "Text", tile: "T", aliases: "plain paragraph", kind: SlashKind::Text },
     SlashItem {
         label: "To-do list",
@@ -102,6 +102,9 @@ pub const SLASH: [SlashItem; 13] = [
     SlashItem { label: "Numbered list", tile: "1.", aliases: "number ordered ol", kind: SlashKind::Prefix("1. ") },
     SlashItem { label: "Quote", tile: "❝", aliases: "blockquote callout", kind: SlashKind::Prefix("> ") },
     SlashItem { label: "Table", tile: "▦", aliases: "table grid columns rows", kind: SlashKind::Table },
+    SlashItem {
+        label: "Callout", tile: "💡", aliases: "callout tip note info box", kind: SlashKind::Prefix("> 💡 ")
+    },
     SlashItem { label: "Code", tile: "</>", aliases: "code block snippet", kind: SlashKind::CodeBlock },
     SlashItem { label: "Divider", tile: "—", aliases: "hr line separator rule", kind: SlashKind::Divider },
     SlashItem { label: "Reminder", tile: "⏰", aliases: "remind alarm time date due", kind: SlashKind::Reminder },

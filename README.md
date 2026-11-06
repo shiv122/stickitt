@@ -35,7 +35,8 @@ no web view, so the app starts instantly, idles at 0% CPU and uses a few megabyt
 - **Trash with undo**, hide and restore, and a tray icon to get everything back.
 - **Virtual desktops** (Windows) and **Spaces** (macOS): each note stays on the desktop it was
   made on, and the dock's edge tab is on every desktop. Picking a note from another desktop in
-  the dock brings it to the one you are on.
+  the dock brings it to the one you are on, and **Move to desktop** in a note's ⋯ menu sends it
+  to another one, no dragging needed.
 - **Configurable**: sizes, colours, the dock and every shortcut live in one commented settings
   file that applies as you save.
 
@@ -75,13 +76,30 @@ quotes, `` ` `` code and links. Type `/` at the start of a line for a menu of bl
 `:name:` for an emoji. Click a to-do's box (or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>) to tick it.
 <kbd>Ctrl</kbd>+<kbd>=</kbd> and <kbd>Ctrl</kbd>+<kbd>-</kbd> zoom the text.
 
-Highlight words with `==text==` for a soft yellow badge, or name a colour: `==green:On track==`,
-`==red:Blocked==` (gray, brown, orange, yellow, green, blue, purple, pink, red).
-<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> highlights the selection.
+Select text and a toolbar appears over it: **B**old, *I*talic, ~~S~~trikethrough, `</>` code,
+🔗 link, and a colour menu with two rows, as in Notion: the text's **colour** and its
+**background** (gray, brown, orange, yellow, green, blue, purple, pink, red). Each button
+toggles, so it also undoes itself. It is all plain Markdown underneath: `==green:On track==` is a
+background, `{red: overdue}` a text colour, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd>
+highlights the selection. <kbd>Ctrl</kbd>+click (<kbd>⌘</kbd>+click) opens a link.
 
-Tables are drawn as a grid, with a bold header and columns that line up. Write them in the usual
-Markdown way, or pick **Table** from the `/` menu; while the caret is in a table it shows as
-plain text so it is easy to edit.
+A quote that starts with an emoji is a callout, a soft box like Notion's: `> 💡 Ship on Friday`
+(or **Callout** in the `/` menu).
+
+Tables are drawn as a grid, Notion-style, and you edit them right in the grid:
+
+- Type in a cell. <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> move between cells (Tab
+  after the last one adds a row), <kbd>Enter</kbd> goes to the cell below, and the arrow keys
+  move between cells and rows.
+- Point at a cell for its handles: **⋮⋮** left of the row opens Insert above / below, Duplicate,
+  Move up / down, Delete row and Delete table; **⋯** above the column opens Align (left, center,
+  right), Insert left / right, Move left / right and Delete column.
+- To leave a table, press <kbd>↓</kbd> or <kbd>Esc</kbd> in its last row, or <kbd>Enter</kbd> on an
+  empty last row; clicking below a table at the end of a note starts a new line there.
+- Prefer buttons? `table_buttons = true` in `[notes]` adds **+** on a table's bottom and right
+  edges for a new row or column.
+
+Write tables in the usual Markdown way, or pick **Table** from the `/` menu.
 
 ```
 | Deal       | Stage    | Value |
@@ -98,7 +116,7 @@ Hover a note to show its controls along the top:
 | Reminder chip | When the reminder is due; click it to change it, × to clear it. |
 | Colour dot | 22 colours plus a custom hue strip. New notes take a different colour each time. |
 | Window | Normal, always on top, or on the desktop behind your windows. |
-| ⋯ | Move the note to another list, switch to compact view, or delete it. |
+| ⋯ | Move the note to another list or another virtual desktop, switch to compact view, or delete it. |
 | × | Hide the note. It stays in the dock; click it there to bring it back. |
 
 <table>
@@ -209,7 +227,9 @@ hidden one), and typing searches. **New note** at the bottom adds a note to the 
   (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> for the next one). Each virtual desktop (Windows)
   or Space (macOS) can remember its own profile.
 - **Lists**: tick the lists the current profile shows, add new ones, or remove one with its ×.
-  Move a note between lists from its ⋯ menu.
+  Move a note between lists from its ⋯ menu. Notes start in the built-in Notes list, so you only
+  need more lists if you want them. Removing a list that has notes asks whether to keep them
+  (they move to Notes) or put them in the Trash.
 - **View**: compact list, detailed list or icons.
 - **Trash**: click a note to restore it, or **Empty trash** (two clicks). Notes are deleted for
   good after 30 days (`trash_days`).
@@ -297,6 +317,7 @@ width         = 220
 | `shadow` | `1` | `0` none, `2` strong |
 | `cover` | `1` | The colour fading in from the top: `0` plain, `1` full |
 | `appear_scale` | `0.97` | Size a note grows from as it appears; `1` fades only |
+| `table_buttons` | `false` | **+** buttons on a table's edges to add a row or a column |
 
 Colour names: Yellow, Pink, Blue, Green, Purple, Gray, Orange, Red, Brown, Teal, Sky, Indigo,
 Violet, Rose, Amber, Lime, Mint, Slate, Cobalt, Grape, Aqua, Lavender.
@@ -350,6 +371,7 @@ notes with a menu open and ringing reminders never fade.
 | `radius` | `16` | Card corner radius |
 | `opacity` | `0.96` | `0.5`–`1` |
 | `hover_push` | `26` | How far a hovered card slides out; `0` off |
+| `list_headers` | `pill` | How lists are labelled when the dock shows more than one: `pill` (a small floating label), `card` (a note-sized card that slides out like the notes), `caption` (quiet text), `line` (the name and a thin rule) or `none` |
 | `[dock.icons]` `tile_size` | `30` | Tile size (also <kbd>Ctrl</kbd>+scroll) |
 | `tile_padding` / `tile_gap` | `10` / `8` | Spacing around and between tiles |
 | `magnify` | `1.6` | Magnification under the pointer; `1` off |

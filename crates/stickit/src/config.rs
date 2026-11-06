@@ -40,6 +40,8 @@ pub struct DockStyle {
     pub opacity: u8,
     /// How far the card under the pointer slides out (neighbours less).
     pub hover_push: f32,
+    /// How each list is labelled when the dock shows more than one.
+    pub list_headers: ListHeaders,
     pub edge_gap: f32,
     /// Icon view.
     pub tile_size: f32,
@@ -71,6 +73,7 @@ impl Default for DockStyle {
             radius: 16.0,
             opacity: 245,
             hover_push: 26.0,
+            list_headers: ListHeaders::Pill,
             edge_gap: 10.0,
             tile_size: 34.0,
             tile_padding: 10.0,
@@ -119,6 +122,8 @@ pub struct NoteStyle {
     pub default_color: NewNoteColor,
     pub compact: CompactStyle,
     pub fade: FadeStyle,
+    /// + buttons on a table's edges to add a row or a column (the row and column menus do it too).
+    pub table_buttons: bool,
 }
 
 /// The colour a new note gets.
@@ -162,6 +167,40 @@ pub struct FadeStyle {
     pub which: FadeWhich,
     /// Compact (one-line) notes fade too.
     pub compact: bool,
+}
+
+/// How the dock labels each list when it shows more than one (a single list has no label).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListHeaders {
+    /// A small floating label above the list.
+    Pill,
+    /// A card in the column, the size of a note, that slides out under the pointer like one.
+    Card,
+    /// Quiet text above the list.
+    Caption,
+    /// The list's name followed by a thin rule across the column.
+    Line,
+    /// No labels: the lists follow one another.
+    None,
+}
+
+impl ListHeaders {
+    pub const ALL: [(ListHeaders, &'static str); 5] = [
+        (ListHeaders::Pill, "pill"),
+        (ListHeaders::Card, "card"),
+        (ListHeaders::Caption, "caption"),
+        (ListHeaders::Line, "line"),
+        (ListHeaders::None, "none"),
+    ];
+
+    pub fn name(self) -> &'static str {
+        Self::ALL.iter().find(|(h, _)| *h == self).map_or("pill", |(_, n)| n)
+    }
+
+    pub fn from_name(v: &str) -> Option<ListHeaders> {
+        let v = v.trim().to_ascii_lowercase();
+        Self::ALL.iter().find(|(_, n)| *n == v).map(|(h, _)| *h)
+    }
 }
 
 /// Which notes fade when idle.
@@ -229,6 +268,7 @@ impl Default for NoteStyle {
             default_color: NewNoteColor::Cycle,
             compact: CompactStyle::default(),
             fade: FadeStyle::default(),
+            table_buttons: false,
         }
     }
 }
@@ -537,6 +577,13 @@ const SETTINGS: &[Setting] = &[
         notes.appear_scale,
         "size a note grows from as it appears; 1 = fade only"
     ),
+    Setting {
+        section: "notes",
+        key: "table_buttons",
+        doc: "+ buttons on a table's edges to add a row or a column (its menus can too)",
+        get: |c| c.notes.table_buttons.to_string(),
+        set: |c, v| c.notes.table_buttons = flag(v).unwrap_or(c.notes.table_buttons),
+    },
     // [notes.compact]
     num_setting!("notes.compact", "height", 24.0, 80.0, notes.compact.height, "height of the one-line note"),
     num_setting!("notes.compact", "min_width", 60.0, 1000.0, notes.compact.min_width, "narrowest it gets"),
@@ -652,6 +699,18 @@ const SETTINGS: &[Setting] = &[
         },
     },
     num_setting!("dock.list", "hover_push", 0.0, 80.0, dock.hover_push, "how far a hovered card slides out (0 = off)"),
+    Setting {
+        section: "dock.list",
+        key: "list_headers",
+        doc: "how lists are labelled when the dock shows more than one:\n\
+              #     pill      a small floating label above each list (the default)\n\
+              #     card      a card in the column, the size of a note, that slides out like one\n\
+              #     caption   quiet text above each list\n\
+              #     line      the list's name followed by a thin rule across the column\n\
+              #     none      no labels; the lists simply follow one another",
+        get: |c| c.dock.list_headers.name().into(),
+        set: |c, v| c.dock.list_headers = ListHeaders::from_name(v).unwrap_or(c.dock.list_headers),
+    },
     // [dock.icons]
     num_setting!("dock.icons", "tile_size", 16.0, 96.0, dock.tile_size, "also Ctrl+mouse wheel over the dock"),
     num_setting!("dock.icons", "tile_padding", 2.0, 30.0, dock.tile_padding, "space around the tiles"),
@@ -1070,6 +1129,7 @@ mod tests {
         assert_eq!(cfg.dock.width, 520.0, "clamped");
         assert_eq!(cfg.dock.opacity, 204);
         assert_eq!(cfg.dock.card_gap, 12.0);
+        assert_eq!(cfg.dock.list_headers, ListHeaders::Pill);
         assert_eq!(cfg.notes.gap, 9.0);
         assert!(cfg.note.iter().all(|(a, _)| *a != NoteAction::Italic), "empty value disables");
         assert_eq!(cfg.global[0].1, "Ctrl+Alt+J");
@@ -1091,6 +1151,20 @@ mod tests {
         // Anything unreadable keeps the defaults.
         let bad = Config::parse("[reminders]\ntimes = 8am, lunch\nsoon =\n");
         assert_eq!(bad.reminders, ReminderSettings::default());
+    }
+
+    #[test]
+    fn list_header_styles() {
+        for (style, name) in ListHeaders::ALL {
+            let cfg = Config::parse(&format!("[dock.list]\nlist_headers = {name}\n"));
+            assert_eq!(cfg.dock.list_headers, style);
+            let again = Config::parse(&cfg.render());
+            assert_eq!(again.dock.list_headers, style, "{name} survives a rewrite");
+            // Every choice is listed in the file's comments.
+            assert!(cfg.render().contains(&format!("#     {name} ")));
+        }
+        let cfg = Config::parse("[dock.list]\nlist_headers = sparkly\n");
+        assert_eq!(cfg.dock.list_headers, ListHeaders::Pill, "unknown names keep the default");
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! Overflow scrolls on a spring with no scrollbar: cards fade out at the edges. Sizes come
 //! from `[dock]` in `stickit.ini`. While tucked away the window shrinks to a few pixels.
 
-use crate::config::{DockStyle, Side};
+use crate::config::{DockStyle, ListHeaders, Side};
 use crate::gfx::{self, Clip, Rect};
 use crate::motion::{Feel, Motion};
 use crate::note::{ellipsized, label_width, small_label, Shared};
@@ -127,7 +127,11 @@ pub enum DockCmd {
     DeleteProfile(i64),
     ToggleList(i64, bool),
     NewList(String),
-    DeleteList(i64),
+    /// Delete a list; its notes go to the default list, or to the trash.
+    DeleteList {
+        id: i64,
+        trash_notes: bool,
+    },
     OpenSettings,
     Quit,
     /// Take a note out of the trash (database id).
@@ -158,6 +162,10 @@ enum Hit {
     AddProfile,
     ListToggle(i64),
     DeleteList(i64),
+    /// Answers to "what happens to this list's notes?"
+    KeepNotes(i64),
+    TrashNotes(i64),
+    CancelDelete,
     AddList,
     Settings,
     Quit,
@@ -197,6 +205,13 @@ enum RowKind {
     /// Menu: opens the trash page, with the number of notes in it.
     TrashLink(usize),
     Back,
+    /// Menu: a line of explanation, indented under the row it's about.
+    Prompt(String),
+    /// Menu: one of the answers to a prompt.
+    Action {
+        label: String,
+        danger: bool,
+    },
     /// Menu: a trashed note (item index).
     Trashed(usize),
     EmptyTrash,
@@ -256,6 +271,8 @@ pub struct Dock {
     trash_page: bool,
     /// "Empty trash" was clicked once; the next click empties it.
     confirm_empty: bool,
+    /// The list being deleted, while the menu asks what happens to its notes.
+    deleting: Option<i64>,
     input: Option<(InputKind, String)>,
     /// Type-to-filter text (when the dock has keyboard focus).
     query: String,
@@ -352,6 +369,7 @@ impl Dock {
             collapsed: HashSet::new(),
             trash_page: false,
             confirm_empty: false,
+            deleting: None,
             input: None,
             query: String::new(),
             drag: None,
@@ -398,6 +416,11 @@ impl Dock {
             self.dark = dark;
             self.needs_paint = true;
         }
+    }
+
+    /// While the app is idle: free the window's pixel buffer (made again at the next paint).
+    pub fn trim(&mut self) {
+        self.surface.trim();
     }
 
     pub fn is_open(&self) -> bool {
@@ -534,6 +557,19 @@ impl Dock {
                 let delete = (l.id != DEFAULT_LIST).then_some(Hit::DeleteList(l.id));
                 let kind = RowKind::Choice { label: l.name.clone(), on: active.contains(&l.id), radio: false, delete };
                 push(MENU_ROW_H, Some(Hit::ListToggle(l.id)), kind, &mut rows);
+                if self.deleting == Some(l.id) {
+                    let n = self.notes_in(l.id);
+                    let home = self.model.lists.iter().find(|l| l.id == DEFAULT_LIST).map_or("Notes", |l| &l.name);
+                    let notes = if n == 1 { "1 note".to_string() } else { format!("{n} notes") };
+                    let ask = format!("Delete “{}” and its {notes}?", l.name);
+                    push(MENU_ROW_H, None, RowKind::Prompt(ask), &mut rows);
+                    let keep = RowKind::Action { label: format!("Delete list, keep notes in {home}"), danger: false };
+                    push(MENU_ROW_H, Some(Hit::KeepNotes(l.id)), keep, &mut rows);
+                    let trash = RowKind::Action { label: "Delete list and notes (to Trash)".into(), danger: true };
+                    push(MENU_ROW_H, Some(Hit::TrashNotes(l.id)), trash, &mut rows);
+                    let cancel = RowKind::Action { label: "Cancel".into(), danger: false };
+                    push(MENU_ROW_H, Some(Hit::CancelDelete), cancel, &mut rows);
+                }
             }
             match &self.input {
                 Some((InputKind::List, _)) => {
@@ -572,7 +608,7 @@ impl Dock {
                         !it.trashed && it.list == l.id && it.here && self.matches(i)
                     })
                     .collect();
-                (l.id, l.name.to_uppercase(), notes)
+                (l.id, l.name.clone(), notes)
             })
             .collect();
         let elsewhere: Vec<usize> = (0..self.items.len())
@@ -581,16 +617,20 @@ impl Dock {
                 self.model.show_others && !it.trashed && !it.here && active.contains(&it.list) && self.matches(i)
             })
             .collect();
-        groups.push((OTHER_DESKTOPS, "OTHER DESKTOPS".into(), elsewhere));
+        groups.push((OTHER_DESKTOPS, "Other desktops".into(), elsewhere));
         groups.retain(|(_, _, notes)| !notes.is_empty());
         let none = groups.is_empty();
         // A single group needs no label.
-        let labelled = groups.len() > 1 || groups.first().is_some_and(|g| g.0 == OTHER_DESKTOPS);
+        let headers = self.style.list_headers;
+        let labelled =
+            headers != ListHeaders::None && (groups.len() > 1 || groups.first().is_some_and(|g| g.0 == OTHER_DESKTOPS));
         for (id, title, notes) in &groups {
             let collapsed = self.collapsed.contains(id);
             if labelled {
                 let kind = RowKind::Section { title: title.clone(), count: notes.len(), collapsed };
-                push(SECTION_H, Some(Hit::Section(*id)), kind, &mut rows);
+                // A header card takes a note's place in the column; the others sit above the list.
+                let h = if headers == ListHeaders::Card { note_h + self.style.card_gap } else { SECTION_H };
+                push(h, Some(Hit::Section(*id)), kind, &mut rows);
             }
             if !collapsed || !labelled {
                 for &i in notes {
@@ -609,6 +649,11 @@ impl Dock {
     /// The icon strip is used unless the menu is open (the menu is always a list).
     fn icons(&self) -> bool {
         self.view == View::Icons && !self.menu
+    }
+
+    /// Notes (not in the trash) in a list.
+    fn notes_in(&self, list: i64) -> usize {
+        self.items.iter().filter(|it| !it.trashed && it.list == list).count()
     }
 
     fn matches(&self, i: usize) -> bool {
@@ -695,7 +740,13 @@ impl Dock {
         let y = (centre - h as i32 / 2).clamp(pos.y, (pos.y + size.height as i32 - h as i32).max(pos.y));
         self.anchor = (centre - y) as f32;
         if self.window.inner_size() != PhysicalSize::new(w, h) {
+            // macOS resizes from the bottom-left corner: put the top-left back at once, or the
+            // dock jumps for a frame while it slides to its place.
+            let top_left = self.window.outer_position().ok();
             let _ = self.window.request_inner_size(PhysicalSize::new(w, h));
+            if let Some(p) = top_left.filter(|_| cfg!(target_os = "macos")) {
+                self.window.set_outer_position(p);
+            }
         }
         match self.snap.as_mut() {
             Some((sx, sy)) => {
@@ -727,9 +778,11 @@ impl Dock {
         let m = self.magnify.value().clamp(0.0, 1.0);
         let py = self.follow.value();
         let width = self.style.width * s;
+        let card_headers = self.style.list_headers == ListHeaders::Card;
         let mut cards = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let (top, h) = match row.kind {
+                RowKind::Section { .. } if card_headers => (row.y, row.h - self.style.card_gap * s),
                 RowKind::Section { .. } | RowKind::Search => {
                     (row.y + row.h - SECTION_PILL_H * s - 4.0 * s, SECTION_PILL_H * s)
                 }
@@ -748,7 +801,9 @@ impl Dock {
             if alpha <= 0.0 {
                 continue;
             }
-            let lift = if matches!(row.kind, RowKind::Note(_) | RowKind::NewNote) {
+            let lift = if matches!(row.kind, RowKind::Note(_) | RowKind::NewNote)
+                || (card_headers && matches!(row.kind, RowKind::Section { .. }))
+            {
                 m * falloff(py - centre, REACH * s)
             } else {
                 0.0
@@ -1150,10 +1205,28 @@ impl Dock {
             Hit::Profile(id) => DockCmd::SelectProfile(id),
             Hit::DeleteProfile(id) => DockCmd::DeleteProfile(id),
             Hit::ListToggle(id) => {
+                self.deleting = None;
                 let on = self.model.profile().is_some_and(|p| p.lists.contains(&id));
                 DockCmd::ToggleList(id, !on)
             }
-            Hit::DeleteList(id) => DockCmd::DeleteList(id),
+            // An empty list just goes; one with notes asks what happens to them first.
+            Hit::DeleteList(id) if self.notes_in(id) == 0 => DockCmd::DeleteList { id, trash_notes: false },
+            Hit::DeleteList(id) => {
+                self.deleting = Some(id);
+                self.apply_geometry();
+                return None;
+            }
+            Hit::KeepNotes(id) | Hit::TrashNotes(id) => {
+                self.deleting = None;
+                self.hover = None;
+                DockCmd::DeleteList { id, trash_notes: matches!(hit, Hit::TrashNotes(_)) }
+            }
+            Hit::CancelDelete => {
+                self.deleting = None;
+                self.hover = None;
+                self.apply_geometry();
+                return None;
+            }
             Hit::Settings => {
                 self.toggle_menu();
                 self.start(false);
@@ -1161,6 +1234,7 @@ impl Dock {
             }
             Hit::Quit => DockCmd::Quit,
             Hit::AddProfile | Hit::AddList => {
+                self.deleting = None;
                 let kind = if hit == Hit::AddProfile { InputKind::Profile } else { InputKind::List };
                 self.input = Some((kind, String::new()));
                 // Typing needs keyboard focus; the dock never takes it otherwise.
@@ -1271,6 +1345,7 @@ impl Dock {
     fn toggle_menu(&mut self) {
         self.menu = !self.menu;
         self.trash_page = false;
+        self.deleting = None;
         self.input = None;
         self.hover = None;
         self.scroll.snap_to(0.0);
@@ -1547,6 +1622,7 @@ impl Dock {
         let mut shapes: Vec<(Shape, Rect, f32)> = Vec::new();
         let mut labels: Vec<Label> = Vec::new();
         let mut tiles: Vec<(Rect, Rgb, f32)> = Vec::new(); // icon tiles: rect, wash, alpha
+        let mut glows: Vec<(Rect, f32)> = Vec::new(); // soft card-coloured backing for desktop text
 
         if expanded {
             if self.menu {
@@ -1562,18 +1638,83 @@ impl Dock {
                     let hovered = row.hit.is_some() && row.hit == hover;
                     match &row.kind {
                         RowKind::Section { title, count, collapsed } => {
-                            let t = small_label(fonts, title, 10.5 * s, Weight::SEMIBOLD);
-                            let c = small_label(fonts, &count.to_string(), 10.5 * s, Weight::MEDIUM);
-                            let pw = label_width(&t) + label_width(&c) + 40.0 * s;
-                            let px = if self.right() { x + cw - pw } else { x };
-                            cards.push(((px, y, pw, ch), a * 0.92, ch / 2.0, hovered));
-                            let ty = y + (ch - line_h(&t)) / 2.0;
-                            let tw = label_width(&t);
-                            labels.push((t, pal.secondary.text((255.0 * a) as u8), (px + 10.0 * s, ty), body_clip));
-                            let cx = px + 14.0 * s + tw;
-                            labels.push((c, pal.secondary.text((170.0 * a) as u8), (cx, ty), body_clip));
-                            let dx = cx + label_width_or(&labels, 0.0) + 4.0 * s;
-                            shapes.push((Shape::Disclosure(*collapsed), (dx, y, 10.0 * s, ch), a));
+                            let caps = title.to_uppercase();
+                            match st.list_headers {
+                                ListHeaders::Pill | ListHeaders::None => {
+                                    let t = small_label(fonts, &caps, 10.5 * s, Weight::SEMIBOLD);
+                                    let c = small_label(fonts, &count.to_string(), 10.5 * s, Weight::MEDIUM);
+                                    let (tw, nw) = (label_width(&t), label_width(&c));
+                                    let pw = tw + nw + 40.0 * s;
+                                    let px = if self.right() { x + cw - pw } else { x };
+                                    cards.push(((px, y, pw, ch), a * 0.92, ch / 2.0, hovered));
+                                    let ty = y + (ch - line_h(&t)) / 2.0;
+                                    labels.push((
+                                        t,
+                                        pal.secondary.text((255.0 * a) as u8),
+                                        (px + 10.0 * s, ty),
+                                        body_clip,
+                                    ));
+                                    let cx = px + 14.0 * s + tw;
+                                    labels.push((c, pal.secondary.text((170.0 * a) as u8), (cx, ty), body_clip));
+                                    let chevron = Shape::Disclosure(*collapsed, pal.secondary);
+                                    shapes.push((chevron, (cx + nw + 4.0 * s, y, 10.0 * s, ch), a));
+                                }
+                                ListHeaders::Card => {
+                                    // Laid out like a note: a tile (holding the count), the name,
+                                    // and a chevron where a note's extras go.
+                                    let radius = (st.radius * s).min(ch / 2.0);
+                                    cards.push((card.rect, a, radius, hovered));
+                                    let base = (ch - 2.0 * 6.0 * s).clamp(18.0 * s, (st.icon_size + 14.0) * s);
+                                    let tile = base * (1.0 + 0.14 * card.lift);
+                                    let tx = x + 6.0 * s + (base - tile) / 2.0;
+                                    let ty = y + (ch - tile) / 2.0;
+                                    tiles.push(((tx, ty, tile, tile), pal.secondary, a * 0.16));
+                                    let n =
+                                        small_label(fonts, &count.to_string(), (base * 0.42).round(), Weight::SEMIBOLD);
+                                    let at = (tx + (tile - label_width(&n)) / 2.0, ty + (tile - line_h(&n)) / 2.0);
+                                    labels.push((n, pal.secondary.text((255.0 * a) as u8), at, body_clip));
+                                    let text_x = x + 6.0 * s + base + 10.0 * s;
+                                    let chevron_x = x + cw - 22.0 * s;
+                                    let room = chevron_x - 8.0 * s - text_x;
+                                    let t = ellipsized(fonts, title, st.font_size * s, Weight::SEMIBOLD, room);
+                                    let at = (text_x, y + (ch - line_h(&t)) / 2.0);
+                                    labels.push((t, pal.text.text((255.0 * a) as u8), at, body_clip));
+                                    let chevron = Shape::Disclosure(*collapsed, pal.secondary);
+                                    shapes.push((chevron, (chevron_x, y, 10.0 * s, ch), a));
+                                }
+                                ListHeaders::Caption | ListHeaders::Line => {
+                                    // Text on the desktop itself, over a soft glow of the card colour
+                                    // so it reads in either theme on any wallpaper.
+                                    let line = st.list_headers == ListHeaders::Line;
+                                    let t = small_label(fonts, &caps, 10.5 * s, Weight::SEMIBOLD);
+                                    let c = small_label(fonts, &count.to_string(), 10.5 * s, Weight::MEDIUM);
+                                    let (tw, nw, th) = (label_width(&t), label_width(&c), line_h(&t));
+                                    let tx = x + 12.0 * s;
+                                    let ty = y + (ch - th) / 2.0;
+                                    let strong = if hovered { 255.0 } else { 225.0 };
+                                    labels.push((t, pal.secondary.text((strong * a) as u8), (tx, ty), body_clip));
+                                    let cx = tx + tw + 6.0 * s;
+                                    labels.push((c, pal.secondary.text((strong * 0.7 * a) as u8), (cx, ty), body_clip));
+                                    let mut end = cx + nw;
+                                    let chevron = Shape::Disclosure(*collapsed, pal.secondary);
+                                    if line {
+                                        // The rule runs to the chevron at the column's far end.
+                                        let chevron_x = x + cw - 22.0 * s;
+                                        shapes.push((
+                                            Shape::Rule,
+                                            (end + 10.0 * s, y, chevron_x - end - 16.0 * s, ch),
+                                            a,
+                                        ));
+                                        shapes.push((chevron, (chevron_x, y, 10.0 * s, ch), a));
+                                        glows.push(((chevron_x - 4.0 * s, ty, 18.0 * s, th), a));
+                                    } else if hovered || *collapsed {
+                                        // Only when it says something: under the pointer, or folded away.
+                                        shapes.push((chevron, (end + 4.0 * s, y, 10.0 * s, ch), a));
+                                        end += 14.0 * s;
+                                    }
+                                    glows.push(((tx - 6.0 * s, ty, end - tx + 12.0 * s, th), a));
+                                }
+                            }
                         }
                         RowKind::Note(i) => {
                             let item = &self.items[*i];
@@ -1688,6 +1829,16 @@ impl Dock {
                             gfx::stroke_path(&mut pm, &p, 1.0 * s, edge, (ea * a) as u8);
                         }
                     }
+                    // A blur, faked with a few widening translucent layers.
+                    for &((gx, gy, gw, gh), a) in &glows {
+                        for k in (0..4).rev() {
+                            let e = k as f32 * 2.5 * s;
+                            let r = gh / 2.0 + e;
+                            if let Some(p) = gfx::rounded_rect(gx - e, gy - e, gw + 2.0 * e, gh + 2.0 * e, r) {
+                                gfx::fill_path(&mut pm, &p, bg, (st.opacity as f32 * 0.3 * a) as u8);
+                            }
+                        }
+                    }
                     for &((x, y, tw, th), wash, a) in &tiles {
                         if let Some(p) = gfx::squircle(x, y, tw, th, tw * 0.26) {
                             gfx::fill_path(&mut pm, &p, wash, (255.0 * a) as u8);
@@ -1777,7 +1928,27 @@ impl Dock {
                         let at = (right - 18.0 * s - label_width(&c), y + (row.h - line_h(&c)) / 2.0);
                         labels.push((c, pal.secondary.text(170), at, clip));
                     }
-                    shapes.push((Shape::Disclosure(true), (right - 12.0 * s, y, 10.0 * s, row.h), 1.0));
+                    shapes.push((Shape::Disclosure(true, pal.secondary), (right - 12.0 * s, y, 10.0 * s, row.h), 1.0));
+                }
+                RowKind::Prompt(text) => {
+                    let t = ellipsized(fonts, text, 11.5 * s, Weight::MEDIUM, right - text_x - 24.0 * s);
+                    let ty = y + (row.h - line_h(&t)) / 2.0;
+                    labels.push((t, pal.secondary.text(255), (text_x + 24.0 * s, ty), clip));
+                }
+                RowKind::Action { label, danger } => {
+                    if hovered {
+                        shapes.push((Shape::Hover, r, 1.0));
+                    }
+                    let color = if *danger {
+                        pal.alert
+                    } else if row.hit == Some(Hit::CancelDelete) {
+                        pal.secondary
+                    } else {
+                        pal.text
+                    };
+                    let t = ellipsized(fonts, label, st.font_size * s, Weight::MEDIUM, right - text_x - 24.0 * s);
+                    let ty = y + (row.h - line_h(&t)) / 2.0;
+                    labels.push((t, color.text(if hovered { 255 } else { 220 }), (text_x + 24.0 * s, ty), clip));
                 }
                 RowKind::Back => {
                     if hovered {
@@ -1992,11 +2163,6 @@ impl Dock {
     }
 }
 
-/// Width of the most recently queued label (used to place a glyph right after it).
-fn label_width_or(labels: &[(Buffer, cosmic_text::Color, (f32, f32), Clip)], fallback: f32) -> f32 {
-    labels.last().map_or(fallback, |(b, ..)| label_width(b))
-}
-
 /// What the tucked-away tab needs, copied out so it can be drawn inside the paint closure.
 struct TabParams {
     open: f32,
@@ -2060,7 +2226,9 @@ enum Shape {
     Hover,
     Plus,
     SmallPlus,
-    Disclosure(bool),
+    Disclosure(bool, Rgb),
+    /// A hairline across the middle of the rect.
+    Rule,
     Badge(Rgb),
     Radio(bool),
     Check(bool),
@@ -2092,13 +2260,18 @@ impl Shape {
                 stroke(pm, &[(cx - r, cy), (cx + r, cy)], 1.6 * s, c, a(220));
                 stroke(pm, &[(cx, cy - r), (cx, cy + r)], 1.6 * s, c, a(220));
             }
-            Shape::Disclosure(collapsed) => {
+            Shape::Disclosure(collapsed, ink) => {
                 let pts = if collapsed {
                     [(cx - 1.5 * s, cy - 3.0 * s), (cx + 1.8 * s, cy), (cx - 1.5 * s, cy + 3.0 * s)]
                 } else {
                     [(cx - 3.0 * s, cy - 1.5 * s), (cx, cy + 1.8 * s), (cx + 3.0 * s, cy - 1.5 * s)]
                 };
-                stroke(pm, &pts, 1.3 * s, pal.secondary, a(200));
+                stroke(pm, &pts, 1.3 * s, ink, a(200));
+            }
+            Shape::Rule => {
+                if w > 0.0 {
+                    stroke(pm, &[(x, cy), (x + w, cy)], 1.0 * s, pal.secondary, a(110));
+                }
             }
             Shape::Badge(c) => {
                 if let Some(p) = gfx::circle(cx, cy, w / 2.0) {

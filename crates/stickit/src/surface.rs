@@ -34,6 +34,12 @@ impl Surface {
         self.inner.pin_to_bottom(on);
     }
 
+    /// Frees the pixel buffer until the next paint. The system keeps its own copy of what is on
+    /// screen, so an idle window needs none of its own; the next paint makes a new one.
+    pub fn trim(&mut self) {
+        self.inner.trim();
+    }
+
     /// Hands `draw` a cleared `width`×`height` buffer, then puts it on screen at `opacity`
     /// (whole-window fade; only honoured where the platform composites our alpha).
     pub fn paint(&mut self, width: u32, height: u32, opacity: u8, draw: impl FnOnce(&mut [u8])) {
@@ -194,6 +200,11 @@ mod imp {
             true
         }
 
+        pub fn trim(&mut self) {
+            unsafe { self.release_bitmap() };
+            self.size = (0, 0);
+        }
+
         unsafe fn release_bitmap(&mut self) {
             if self.bitmap != 0 {
                 SelectObject(self.dc, self.old);
@@ -294,6 +305,8 @@ mod imp {
 
         pub fn pin_to_bottom(&mut self, _on: bool) {}
 
+        pub fn trim(&mut self) {}
+
         pub fn paint(&mut self, w: u32, h: u32, opacity: u8, draw: impl FnOnce(&mut [u8])) {
             unsafe extern "C-unwind" fn release(_info: *mut c_void, data: NonNull<c_void>, size: usize) {
                 // SAFETY: the same boxed slice handed over below.
@@ -361,6 +374,8 @@ mod imp {
         }
 
         pub fn pin_to_bottom(&mut self, _on: bool) {}
+
+        pub fn trim(&mut self) {}
 
         pub fn paint(&mut self, w: u32, h: u32, _opacity: u8, draw: impl FnOnce(&mut [u8])) {
             let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else { return };

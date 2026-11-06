@@ -109,3 +109,14 @@ pub fn show_cursor(icon: winit::window::CursorIcon) {
         }
     }
 }
+
+/// Opens a web or mail link in the default browser or mail app (callers pass only `http(s)://`
+/// and `mailto:` addresses).
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}

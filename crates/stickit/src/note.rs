@@ -307,6 +307,8 @@ pub struct Note {
     preedit_len: usize,
     content_h: f32,
     scroll: f32,
+    /// The page's scroll position when it folded into a compact line, restored when it opens.
+    page_scroll: Option<f32>,
     goal_x: Option<f32>,
     decos: Vec<(std::ops::Range<usize>, Deco)>,
     /// Caret line the current layout was built for (its list syntax is shown raw).
@@ -456,6 +458,7 @@ impl Note {
             preedit_len: 0,
             content_h: 0.0,
             scroll: 0.0,
+            page_scroll: None,
             goal_x: None,
             decos: Vec::new(),
             layout_caret_line: None,
@@ -552,6 +555,8 @@ impl Note {
     }
 
     fn collapse(&mut self) {
+        // A compact line lays out nothing; the page picks up where it was when it opens again.
+        self.page_scroll = Some(self.scroll);
         self.expanded = false;
         self.popover = None;
         self.view_dirty = true;
@@ -817,10 +822,25 @@ impl Note {
 
     // ---- layout -------------------------------------------------------------------------
 
+    /// The window is showing the page at its page size. Not while it is a compact line, nor
+    /// while it grows back into a page: the note takes focus first, and text laid out at the
+    /// line's width wraps so much that its scroll position means nothing on the page.
+    fn page_ready(&self) -> bool {
+        let h = self.window.inner_size().to_logical::<f64>(self.window.scale_factor()).height;
+        !self.collapsed() && h >= MIN_SIZE.1 - 1.0
+    }
+
     fn sync_layout(&mut self, fonts: &mut FontSystem) {
+        if !self.page_ready() {
+            return;
+        }
         let (_, _, cw, _) = self.content_rect();
         if self.layout_dirty || cw != self.layout_width {
             self.relayout(fonts, cw);
+        }
+        if let Some(scroll) = self.page_scroll.take() {
+            self.scroll = scroll;
+            self.clamp_scroll();
         }
         self.sync_scroll(fonts);
     }
@@ -1140,6 +1160,9 @@ impl Note {
     }
 
     fn ensure_caret_visible(&mut self, fonts: &mut FontSystem) {
+        if !self.page_ready() {
+            return;
+        }
         let (cx, cy, _, vh) = self.content_rect();
         let mut geom = self.caret_geom(self.to_display(self.doc.cursor));
         if geom.is_none() {
@@ -1169,6 +1192,13 @@ impl Note {
 
     /// Call after anything that changes text, caret or selection.
     fn changed(&mut self, shared: &mut Shared, text: bool) {
+        self.refresh(shared, text);
+        self.ensure_caret_visible(&mut shared.fonts);
+    }
+
+    /// `changed` without bringing the caret into view: for focus changes, which shouldn't move
+    /// the page away from where it was scrolled to.
+    fn refresh(&mut self, shared: &mut Shared, text: bool) {
         if text {
             self.dirty = true;
             self.layout_dirty = true;
@@ -1179,7 +1209,6 @@ impl Note {
         self.validate_slash();
         self.validate_emoji();
         self.sync_layout(&mut shared.fonts);
-        self.ensure_caret_visible(&mut shared.fonts);
         self.caret_on = true;
         self.blink_at = Instant::now();
         self.last_input = self.blink_at;
@@ -1490,9 +1519,9 @@ impl Note {
                 self.editing = false;
                 self.drag_select = false;
                 if !focused && self.consume_reminders() {
-                    self.changed(shared, true);
+                    self.refresh(shared, true);
                 }
-                self.changed(shared, false);
+                self.refresh(shared, false);
                 if !focused && self.compact && self.expanded && self.st.compact.collapse_on_blur {
                     self.collapse();
                 }

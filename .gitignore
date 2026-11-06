@@ -23,3 +23,7 @@
 *~
 .DS_Store
 desktop.ini
+
+# Promo video: only the rendered video is kept (the Remotion project stays local).
+/promo/*
+!/promo/stick-itt-promo.mp4

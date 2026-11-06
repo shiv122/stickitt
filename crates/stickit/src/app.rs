@@ -131,6 +131,7 @@ pub struct App {
 
 impl App {
     pub fn new(store: Store, bench: Option<Bench>, shots: Option<Shots>, config: Config) -> Self {
+        crate::theme::set_appearance(config.general.theme);
         let active_profile = store.setting("profile").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_PROFILE);
         let mut app = Self {
             shared: Shared {
@@ -454,15 +455,21 @@ impl App {
         if !self.shared.config.reload_if_changed() {
             return;
         }
+        crate::theme::set_appearance(self.shared.config.general.theme);
         let style = self.dock_style();
         if let Some(dock) = self.dock.as_mut() {
             dock.set_style(style);
+            dock.refresh_theme();
+        }
+        if let Some(toast) = self.toast.as_mut() {
+            toast.refresh_theme();
         }
         let notes = self.shared.config.notes.clone();
         let taskbar = self.shared.config.desktops.per_desktop;
         for n in self.notes.values_mut() {
             n.set_style(&notes);
             n.set_taskbar(taskbar);
+            n.refresh_theme();
         }
         self.reload_model();
         self.register_hotkeys();

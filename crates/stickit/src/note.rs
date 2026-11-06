@@ -23,7 +23,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, ResizeDirection, Theme, UserAttentionType, Window, WindowLevel};
+use winit::window::{CursorIcon, ResizeDirection, UserAttentionType, Window, WindowLevel};
 
 // Layout, in logical pixels.
 /// Transparent space around the card for its shadow (only where we draw our own shadow).
@@ -423,7 +423,7 @@ impl Note {
         #[cfg(target_os = "macos")]
         crate::desktops::show_on_all(&window, !shared.config.desktops.per_desktop);
         let surface = Surface::new(ctx, &window, false)?;
-        let dark = window.theme() == Some(Theme::Dark);
+        let dark = crate::theme::is_dark(window.theme());
         let now = Instant::now();
         let mut note = Note {
             id: rec.id,
@@ -1511,7 +1511,7 @@ impl Note {
                 }
             }
             WindowEvent::ThemeChanged(theme) => {
-                self.dark = *theme == Theme::Dark;
+                self.dark = crate::theme::is_dark(Some(*theme));
                 self.layout_dirty = true;
                 self.needs_paint = true;
             }
@@ -2850,6 +2850,17 @@ impl Note {
             }
         };
         (title, sub)
+    }
+
+    /// Picks up a changed `[general] theme`.
+    pub fn refresh_theme(&mut self) {
+        let dark = crate::theme::is_dark(self.window.theme());
+        if dark != self.dark {
+            // Text colours are part of the layout.
+            self.dark = dark;
+            self.layout_dirty = true;
+            self.needs_paint = true;
+        }
     }
 
     pub fn set_style(&mut self, st: &NoteStyle) {

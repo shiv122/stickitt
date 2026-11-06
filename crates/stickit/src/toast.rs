@@ -16,7 +16,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
-use winit::window::{CursorIcon, Theme, Window, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowLevel};
 
 // Logical pixels.
 const PILL_W: f32 = 236.0;
@@ -53,6 +53,15 @@ pub struct Toast {
 }
 
 impl Toast {
+    /// Picks up a changed `[general] theme`.
+    pub fn refresh_theme(&mut self) {
+        let dark = crate::theme::is_dark(self.window.theme());
+        if dark != self.dark {
+            self.dark = dark;
+            self.needs_paint = true;
+        }
+    }
+
     pub fn open(
         el: &ActiveEventLoop,
         ctx: &surface::Context,
@@ -84,7 +93,7 @@ impl Toast {
         };
         let window = Rc::new(el.create_window(attrs)?);
         let surface = Surface::new(ctx, &window, true)?;
-        let dark = window.theme() == Some(Theme::Dark);
+        let dark = crate::theme::is_dark(window.theme());
         let mut shown = Motion::new(0.0, Feel::Snappy);
         shown.to(1.0);
         let toast = Toast {
@@ -175,7 +184,7 @@ impl Toast {
                 }
             }
             WindowEvent::ThemeChanged(theme) => {
-                self.dark = *theme == Theme::Dark;
+                self.dark = crate::theme::is_dark(Some(*theme));
                 self.needs_paint = true;
             }
             WindowEvent::RedrawRequested => self.needs_paint = true,

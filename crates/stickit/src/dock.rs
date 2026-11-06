@@ -27,7 +27,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, Theme, Window, WindowId, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 // Logical pixels.
 /// Pointer travel that turns a press on a card into a drag of the whole dock.
@@ -327,7 +327,7 @@ impl Dock {
         // The edge tab is there on every desktop (macOS Spaces, full-screen apps included).
         crate::desktops::show_on_all(&window, true);
         let surface = Surface::new(ctx, &window, true)?;
-        let dark = window.theme() == Some(Theme::Dark);
+        let dark = crate::theme::is_dark(window.theme());
         let mut dock = Dock {
             window,
             surface,
@@ -389,6 +389,15 @@ impl Dock {
             m.settle();
         }
         self.needs_paint = true;
+    }
+
+    /// Picks up a changed `[general] theme`.
+    pub fn refresh_theme(&mut self) {
+        let dark = crate::theme::is_dark(self.window.theme());
+        if dark != self.dark {
+            self.dark = dark;
+            self.needs_paint = true;
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -1344,7 +1353,7 @@ impl Dock {
                 self.left_at = None;
             }
             WindowEvent::ThemeChanged(theme) => {
-                self.dark = *theme == Theme::Dark;
+                self.dark = crate::theme::is_dark(Some(*theme));
                 self.needs_paint = true;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {

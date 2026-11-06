@@ -271,12 +271,28 @@ impl Store {
         Ok(id)
     }
 
-    /// Deletes a list; its notes move to the default list.
-    pub fn delete_list(&self, id: i64) -> rusqlite::Result<()> {
+    /// Deletes a list. Its notes move to the default list, and every profile that showed the
+    /// list now shows the default list too, so they stay in sight. With `trash_notes` they go to
+    /// the trash instead (and come back into the default list if restored). Either way no
+    /// profile is left showing no list at all.
+    pub fn delete_list(&self, id: i64, trash_notes: bool) -> rusqlite::Result<()> {
         if id == DEFAULT_LIST {
             return Ok(());
         }
+        if trash_notes {
+            self.conn
+                .execute("UPDATE notes SET deleted_at = unixepoch() WHERE list_id = ?1 AND deleted_at IS NULL", [id])?;
+        }
         self.conn.execute("UPDATE notes SET list_id = ?1 WHERE list_id = ?2", [DEFAULT_LIST, id])?;
+        let shown_by = if trash_notes {
+            // Only the profiles that would be left empty.
+            "SELECT profile_id, ?1 FROM profile_lists pl WHERE list_id = ?2 AND NOT EXISTS
+             (SELECT 1 FROM profile_lists o WHERE o.profile_id = pl.profile_id AND o.list_id != ?2)"
+        } else {
+            "SELECT profile_id, ?1 FROM profile_lists WHERE list_id = ?2"
+        };
+        self.conn.execute(&format!("INSERT OR IGNORE INTO profile_lists {shown_by}"), [DEFAULT_LIST, id])?;
+        self.conn.execute("DELETE FROM profile_lists WHERE list_id = ?1", [id])?;
         self.conn.execute("DELETE FROM lists WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -301,12 +317,25 @@ impl Store {
         Ok(())
     }
 
+    /// Shows or hides `list` in `profile`. A profile always shows at least one list: hiding the
+    /// last one shows the default list instead (and the default list can't be the one hidden).
     pub fn set_profile_list(&self, profile: i64, list: i64, on: bool) -> rusqlite::Result<()> {
         if on {
             self.conn.execute("INSERT OR IGNORE INTO profile_lists VALUES (?1, ?2)", [profile, list])?;
-        } else {
-            self.conn.execute("DELETE FROM profile_lists WHERE profile_id = ?1 AND list_id = ?2", [profile, list])?;
+            return Ok(());
         }
+        let others: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM profile_lists WHERE profile_id = ?1 AND list_id != ?2",
+            [profile, list],
+            |r| r.get(0),
+        )?;
+        if others == 0 {
+            if list == DEFAULT_LIST {
+                return Ok(());
+            }
+            self.conn.execute("INSERT OR IGNORE INTO profile_lists VALUES (?1, ?2)", [profile, DEFAULT_LIST])?;
+        }
+        self.conn.execute("DELETE FROM profile_lists WHERE profile_id = ?1 AND list_id = ?2", [profile, list])?;
         Ok(())
     }
 
@@ -412,13 +441,49 @@ mod tests {
         rec.list = work;
         rec.id = store.insert(&rec).unwrap();
         store.save_all([&rec]).unwrap();
-        store.delete_list(work).unwrap();
+        store.delete_list(work, false).unwrap();
         assert_eq!(store.load().unwrap()[0].list, DEFAULT_LIST);
-        assert!(store.profiles().unwrap()[1].lists.is_empty());
+        // The profile that showed the list now shows where its notes went.
+        assert_eq!(store.profiles().unwrap()[1].lists, vec![DEFAULT_LIST]);
 
         store.set_setting("profile", "2");
         store.set_setting("profile", "3");
         assert_eq!(store.setting("profile").as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn deleting_a_list_with_its_notes() {
+        let store = Store::in_memory().unwrap();
+        let work = store.create_list("Work", DEFAULT_PROFILE).unwrap();
+        let home = store.create_list("Home", DEFAULT_PROFILE).unwrap();
+        let focus = store.create_profile("Focus", &[work]).unwrap();
+        let both = store.create_profile("Both", &[work, home]).unwrap();
+        let id = store.insert(&NoteRecord { list: work, ..note() }).unwrap();
+        let lists_of = |p: i64| store.profiles().unwrap().into_iter().find(|x| x.id == p).map(|x| x.lists);
+        store.delete_list(work, true).unwrap();
+        // The note is in the trash, and comes back into the default list.
+        assert!(store.load().unwrap().iter().all(|n| n.id != id));
+        assert_eq!(store.restore(id).unwrap().map(|n| n.list), Some(DEFAULT_LIST));
+        // A profile left with nothing shows the default list; one with other lists keeps them.
+        assert_eq!(lists_of(focus), Some(vec![DEFAULT_LIST]));
+        assert_eq!(lists_of(both), Some(vec![home]));
+    }
+
+    #[test]
+    fn a_profile_always_shows_a_list() {
+        let store = Store::in_memory().unwrap();
+        let work = store.create_list("Work", DEFAULT_PROFILE).unwrap();
+        let focus = store.create_profile("Focus", &[work]).unwrap();
+        let lists_of = |p: i64| store.profiles().unwrap().into_iter().find(|x| x.id == p).map(|x| x.lists);
+        // Hiding the last list shows the default one instead.
+        store.set_profile_list(focus, work, false).unwrap();
+        assert_eq!(lists_of(focus), Some(vec![DEFAULT_LIST]));
+        // ...which can't be hidden while it's the only one.
+        store.set_profile_list(focus, DEFAULT_LIST, false).unwrap();
+        assert_eq!(lists_of(focus), Some(vec![DEFAULT_LIST]));
+        store.set_profile_list(focus, work, true).unwrap();
+        store.set_profile_list(focus, DEFAULT_LIST, false).unwrap();
+        assert_eq!(lists_of(focus), Some(vec![work]));
     }
 
     #[test]
@@ -436,10 +501,10 @@ mod tests {
         store.set_profile_list(focus, DEFAULT_LIST, false).unwrap();
         assert_eq!(lists_of(focus), Some(vec![work]));
         // Deleting a list moves its notes to the default list.
-        store.delete_list(work).unwrap();
+        store.delete_list(work, false).unwrap();
         assert_eq!(store.load().unwrap().iter().find(|n| n.id == id).map(|n| n.list), Some(DEFAULT_LIST));
         // The defaults can't be deleted.
-        store.delete_list(DEFAULT_LIST).unwrap();
+        store.delete_list(DEFAULT_LIST, true).unwrap();
         store.delete_profile(DEFAULT_PROFILE).unwrap();
         assert!(store.lists().unwrap().iter().any(|l| l.id == DEFAULT_LIST));
         assert!(lists_of(DEFAULT_PROFILE).is_some());

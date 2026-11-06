@@ -190,6 +190,82 @@ pub fn highlights(text: &str) -> Vec<Highlight> {
     out
 }
 
+/// Every `{red: text}` text colour in `text` (colours as in `HIGHLIGHTS`); each stays in a line.
+pub fn text_colors(text: &str) -> Vec<Highlight> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    for line in text.split('\n') {
+        let mut i = 0;
+        while let Some(at) = line[i..].find('{').map(|k| i + k) {
+            let Some(colon) = line[at..].find(':').map(|k| at + k) else { break };
+            let name = &line[at + 1..colon];
+            let Some(color) = HIGHLIGHTS.iter().position(|h| h.eq_ignore_ascii_case(name)) else {
+                i = at + 1;
+                continue;
+            };
+            let body = colon + 1 + (line[colon + 1..].len() - line[colon + 1..].trim_start().len());
+            let Some(close) = line[body..].find('}').map(|k| body + k) else { break };
+            if close > body {
+                out.push(Highlight {
+                    text: base + body..base + close,
+                    open: base + at..base + body,
+                    close: base + close..base + close + 1,
+                    color,
+                });
+            }
+            i = close + 1;
+        }
+        base += line.len() + 1;
+    }
+    out
+}
+
+/// A callout: a quote whose text starts with an emoji (`> 💡 Remember the demo`).
+pub fn is_callout(line: &str) -> bool {
+    let rest = line.trim_start().strip_prefix('>').map(str::trim_start);
+    rest.and_then(|r| r.chars().next()).is_some_and(|c| {
+        let c = c as u32;
+        (0x1F300..=0x1FAFF).contains(&c) || (0x2600..=0x27BF).contains(&c) || (0x2B00..=0x2BFF).contains(&c)
+    })
+}
+
+/// The web or mail address of the link at byte `col` of `line`: a `[text](url)` or a bare
+/// `https://…`. Anything else (files, scripts) is not a link to open.
+pub fn link_at(line: &str, col: usize) -> Option<&str> {
+    let safe = |u: &str| ["https://", "http://", "mailto:"].iter().any(|p| u.starts_with(p));
+    let mut i = 0;
+    while let Some(open) = line[i..].find('[').map(|k| i + k) {
+        let Some(close) = line[open..].find("](").map(|k| open + k) else { break };
+        let Some(end) = line[close..].find(')').map(|k| close + k) else { break };
+        if (open..=end).contains(&col) {
+            let url = line[close + 2..end].trim();
+            return safe(url).then_some(url);
+        }
+        i = end + 1;
+    }
+    let start = line[..col.min(line.len())].rfind(char::is_whitespace).map_or(0, |k| k + 1);
+    let end = line[start..].find(char::is_whitespace).map_or(line.len(), |k| start + k);
+    let word = line[start..end].trim_end_matches(['.', ',', ')', ';']);
+    safe(word).then_some(word)
+}
+
+/// `line` without badge and text colour syntax: `==green:Won==` reads `Won` (for summaries).
+pub fn strip_marks(line: &str) -> String {
+    let mut cut: Vec<std::ops::Range<usize>> =
+        highlights(line).into_iter().chain(text_colors(line)).flat_map(|h| [h.open, h.close]).collect();
+    cut.sort_by_key(|r| r.start);
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for r in cut {
+        if r.start >= at {
+            out.push_str(&line[at..r.start]);
+            at = r.end;
+        }
+    }
+    out.push_str(&line[at..]);
+    out
+}
+
 /// Per-byte style flags for `text`.
 pub fn style(text: &str) -> Vec<Flags> {
     let mut st = vec![0; text.len()];
@@ -358,6 +434,22 @@ fn find_closer(b: &[u8], from: usize, to: usize, c: u8, dl: usize) -> Option<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_colours_callouts_links() {
+        let t = "a {red: late} and {blue:ok} but {nope: x} {red: }";
+        let found: Vec<(&str, &str)> =
+            text_colors(t).iter().map(|h| (&t[h.text.clone()], &t[h.open.clone()])).collect();
+        assert_eq!(found, [("late", "{red: "), ("ok", "{blue:")]);
+        assert!(is_callout("> 💡 Tip"));
+        assert!(!is_callout("> just a quote"));
+        let line = "see [docs](https://x.dev/a) or https://y.dev, not [f](file:///etc)";
+        assert_eq!(link_at(line, 6), Some("https://x.dev/a"));
+        assert_eq!(link_at(line, line.find("y.dev").unwrap()), Some("https://y.dev"));
+        assert_eq!(link_at(line, line.find("[f]").unwrap() + 1), None, "only web and mail links");
+        assert_eq!(link_at(line, 1), None);
+        assert_eq!(strip_marks("==green:Won== and {red: late}"), "Won and late");
+    }
 
     #[test]
     fn highlights_with_and_without_colour() {

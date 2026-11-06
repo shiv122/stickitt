@@ -16,6 +16,7 @@ mod popover;
 mod reminder;
 mod store;
 mod surface;
+mod table;
 mod theme;
 mod toast;
 mod tray;

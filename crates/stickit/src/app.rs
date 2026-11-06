@@ -37,6 +37,11 @@ const CONFIG_POLL: Duration = Duration::from_millis(700);
 const CONFIG_WATCH: Duration = Duration::from_secs(30 * 60);
 /// How often old entries are dropped from the text shaping cache.
 const SHAPE_CACHE_TRIM: Duration = Duration::from_secs(5);
+/// This long after the last paint the app counts as idle and gives memory back (see `trim_idle`).
+const IDLE_TRIM: Duration = Duration::from_secs(2);
+/// Rasterized glyphs kept between paints; beyond this the cache starts over (glyphs are drawn
+/// again as needed, which is quick).
+const GLYPH_CACHE: usize = 1024;
 /// Trashed notes listed in the dock.
 const TRASH_LISTED: i64 = 50;
 /// System closes this close together are the taskbar's "Close all windows".
@@ -121,6 +126,8 @@ pub struct App {
     /// One refresh of the primary monitor.
     frame: Duration,
     last_trim: Instant,
+    /// When the app will count as idle (set after each paint).
+    trim_at: Option<Instant>,
     /// Notes were added, removed or changed since the dock's list was built.
     dock_stale: bool,
     /// Watching stickit.ini for saves until then; next check at the second instant.
@@ -165,6 +172,7 @@ impl App {
             next_frame: Instant::now(),
             frame: DEFAULT_FRAME,
             last_trim: Instant::now(),
+            trim_at: None,
             dock_stale: true,
             config_watch: None,
             shots,
@@ -188,6 +196,20 @@ impl App {
                 active: self.active_profile,
                 show_others: self.shared.config.desktops.dock_shows_others,
             });
+        }
+    }
+
+    /// Shows the "Moved to trash · Undo" toast for a trashed note, or adds the note to the one
+    /// already showing.
+    fn offer_undo(&mut self, el: &ActiveEventLoop, id: i64, monitor: Option<winit::monitor::MonitorHandle>) {
+        match self.toast.as_mut().filter(|t| !t.closed()) {
+            Some(t) => t.add(id),
+            None => {
+                let Some(ctx) = self.ctx.as_ref() else { return };
+                let show_for = Duration::from_secs_f32(self.shared.config.general.undo_seconds);
+                self.toast =
+                    Toast::open(el, ctx, monitor, id, show_for).map_err(|e| eprintln!("stickit: no toast: {e}")).ok();
+            }
         }
     }
 
@@ -324,7 +346,10 @@ impl App {
         pos: Option<(i32, i32)>,
         focus: bool,
     ) -> Option<WindowId> {
-        let list = self.active_lists().first().copied().unwrap_or(DEFAULT_LIST);
+        // New notes go to the default list, unless this profile doesn't show it.
+        let shown = self.active_lists();
+        let list =
+            if shown.contains(&DEFAULT_LIST) { DEFAULT_LIST } else { shown.first().copied().unwrap_or(DEFAULT_LIST) };
         let mut rec = NoteRecord {
             id: 0,
             body: body.to_string(),
@@ -380,6 +405,30 @@ impl App {
 
     fn run(&mut self, el: &ActiveEventLoop, from: WindowId, cmd: Cmd) {
         match cmd {
+            Cmd::MoveToDesktop(desktop) => {
+                if let Some(n) = self.notes.get_mut(&from) {
+                    if self.desktops.move_to(&n.window, &desktop) {
+                        n.desktop = Some(desktop);
+                        n.dirty = true;
+                        self.dock_stale = true;
+                    }
+                }
+            }
+            Cmd::PassClick(x, y) => {
+                // The note whose card is under the point; one-line notes first, as they sit close.
+                let inside = |n: &Note| {
+                    n.card_on_screen().is_some_and(|(cx, cy, w, h)| x >= cx && x < cx + w && y >= cy && y < cy + h)
+                };
+                let target = self
+                    .notes
+                    .iter()
+                    .filter(|(id, n)| **id != from && n.shown && !n.closing && inside(n))
+                    .max_by_key(|(_, n)| n.is_collapsed())
+                    .map(|(id, _)| *id);
+                if let Some(n) = target.and_then(|id| self.notes.get_mut(&id)) {
+                    n.take_click();
+                }
+            }
             Cmd::NewNote => {
                 // Opens just below and right of the note it was made from.
                 let pos = self.notes.get(&from).and_then(|n| {
@@ -425,16 +474,7 @@ impl App {
                 let (id, monitor) = (n.id, n.window.current_monitor());
                 self.dock_stale = true;
                 self.tray_stale = true;
-                match self.toast.as_mut().filter(|t| !t.closed()) {
-                    Some(t) => t.add(id),
-                    None => {
-                        let Some(ctx) = self.ctx.as_ref() else { return };
-                        let show_for = Duration::from_secs_f32(self.shared.config.general.undo_seconds);
-                        self.toast = Toast::open(el, ctx, monitor, id, show_for)
-                            .map_err(|e| eprintln!("stickit: no toast: {e}"))
-                            .ok();
-                    }
-                }
+                self.offer_undo(el, id, monitor);
             }
             Cmd::Quit => {
                 self.flush();
@@ -561,10 +601,21 @@ impl App {
                 let _ = self.store.create_list(&name, self.active_profile);
                 self.reload_model();
             }
-            DockCmd::DeleteList(id) => {
-                let _ = self.store.delete_list(id);
+            DockCmd::DeleteList { id, trash_notes } => {
+                self.flush();
+                let _ = self.store.delete_list(id, trash_notes);
+                let mut trashed = Vec::new();
                 for n in self.notes.values_mut().filter(|n| n.list == id) {
                     n.list = DEFAULT_LIST;
+                    if trash_notes && !n.closing {
+                        n.dirty = false;
+                        n.begin_close();
+                        trashed.push((n.id, n.window.current_monitor()));
+                    }
+                }
+                // One toast offers to bring them all back.
+                for (note, monitor) in trashed {
+                    self.offer_undo(el, note, monitor);
                 }
                 self.reload_model();
                 self.apply_visibility();
@@ -789,6 +840,29 @@ impl App {
     }
 }
 
+impl App {
+    /// The app is idle (nothing painted for `IDLE_TRIM`): give memory back without changing
+    /// anything on screen. Windows' pixel buffers go (the system keeps what is shown), undo
+    /// histories fold into compact steps, and the text caches are cut down.
+    fn trim_idle(&mut self) {
+        self.trim_at = None;
+        for note in self.notes.values_mut() {
+            note.trim();
+        }
+        if let Some(dock) = self.dock.as_mut() {
+            dock.trim();
+        }
+        self.shared.fonts.shape_run_cache.trim(4);
+        let swash = &mut self.shared.swash;
+        if swash.image_cache.len() > GLYPH_CACHE {
+            swash.image_cache.clear();
+        }
+        if swash.outline_command_cache.len() > GLYPH_CACHE {
+            swash.outline_command_cache.clear();
+        }
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.started {
@@ -823,7 +897,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let pos = Some((40 + (i % 8) as i32 * 230, 40 + (i / 8) as i32 * 200));
                 let id = self.create(el, &body, (i % 6) as u16, pos, false);
                 if let Some(n) = id.filter(|_| b.big).and_then(|id| self.notes.get(&id)) {
-                    let _ = n.window.request_inner_size(winit::dpi::LogicalSize::new(460.0, 720.0));
+                    n.resize(winit::dpi::LogicalSize::new(460.0, 720.0));
                 }
             }
             return;
@@ -884,6 +958,14 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let Some(note) = self.notes.get_mut(&id).filter(|n| !n.closing) else { return };
+        if matches!(event, WindowEvent::Focused(true)) {
+            // What the note menu offers under "Move to desktop" (nothing when notes show on
+            // every desktop), and where the note is now.
+            note.desktop_list = if self.shared.config.desktops.per_desktop { self.desktops.list() } else { Vec::new() };
+            if let Some(d) = self.desktops.of(&note.window) {
+                note.desktop = Some(d);
+            }
+        }
         if let Some(cmd) = note.handle(&event, &mut self.shared) {
             self.run(el, id, cmd);
         }
@@ -972,6 +1054,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let t = Instant::now();
                 note.render(&mut self.shared);
                 trace(&mut self.trace, "note", t);
+            }
+            self.trim_at = Some(now + IDLE_TRIM);
+        }
+        if let Some(at) = self.trim_at {
+            if now >= at {
+                self.trim_idle();
+            } else {
+                wake(at);
             }
         }
         if let Some((until, at)) = self.config_watch {

@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 const UNDO_LIMIT: usize = 200;
+/// History kept per note, in bytes of replaced text: the oldest steps go first beyond this.
+const UNDO_BYTES: usize = 1 << 20;
 const COALESCE_WINDOW: Duration = Duration::from_millis(1200);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,32 @@ struct Snapshot {
     anchor: Option<usize>,
 }
 
+/// One step of history, keeping only what changed: the text between `start` and `start + len`
+/// was `old` before the step, and the caret and selection were at `cursor` and `anchor`.
+struct Change {
+    start: usize,
+    len: usize,
+    old: String,
+    cursor: usize,
+    anchor: Option<usize>,
+}
+
+/// The part of `after` that differs from `before`: (start, length in `after`, the text it
+/// replaced in `before`), on char boundaries.
+fn diff(before: &str, after: &str) -> (usize, usize, String) {
+    let (a, b) = (before.as_bytes(), after.as_bytes());
+    let mut start = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    while !before.is_char_boundary(start) {
+        start -= 1;
+    }
+    let room = a.len().min(b.len()) - start;
+    let mut tail = a.iter().rev().zip(b.iter().rev()).take(room).take_while(|(x, y)| x == y).count();
+    while !before.is_char_boundary(a.len() - tail) || !after.is_char_boundary(b.len() - tail) {
+        tail -= 1;
+    }
+    (start, b.len() - tail - start, before[start..a.len() - tail].to_string())
+}
+
 pub struct Preedit {
     pub text: String,
     /// Caret inside the preedit, as a byte offset into `text`.
@@ -36,8 +64,11 @@ pub struct Doc {
     pub cursor: usize,
     pub anchor: Option<usize>,
     pub preedit: Option<Preedit>,
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: Vec<Change>,
+    redo: Vec<Change>,
+    /// The text as it was before the edits now being grouped, until `fold` turns it into a
+    /// `Change` (one full copy at most, and none once the note is idle).
+    pending: Option<Snapshot>,
     last_edit: Option<(EditKind, Instant)>,
 }
 
@@ -93,10 +124,8 @@ impl Doc {
         let coalesce =
             matches!(self.last_edit, Some((k, t)) if k == kind && kind != EditKind::Other && now - t < COALESCE_WINDOW);
         if !coalesce {
-            self.undo.push(self.snapshot());
-            if self.undo.len() > UNDO_LIMIT {
-                self.undo.remove(0);
-            }
+            self.fold();
+            self.pending = Some(self.snapshot());
         }
         self.redo.clear();
         self.last_edit = Some((kind, now));
@@ -295,25 +324,161 @@ impl Doc {
         }
     }
 
+    /// Whether the selection sits right inside a pair of `marker`s (e.g. it is bold already).
+    pub fn is_wrapped(&self, marker: &str) -> bool {
+        let Some(r) = self.selection() else { return false };
+        let m = marker.len();
+        r.start >= m && self.text.get(r.start - m..r.start) == Some(marker) && self.text[r.end..].starts_with(marker)
+    }
+
+    /// Wraps the selection in `marker`, or unwraps it if it is wrapped already (the toolbar's
+    /// Bold, Italic, Strikethrough and Code buttons). The text stays selected.
+    pub fn toggle_wrap(&mut self, marker: &str) {
+        let Some(r) = self.selection() else { return self.wrap(marker) };
+        if !self.is_wrapped(marker) {
+            return self.wrap(marker);
+        }
+        let m = marker.len();
+        let inner = self.text[r.clone()].to_string();
+        self.replace(r.start - m..r.end + m, &inner, EditKind::Other);
+        self.anchor = Some(r.start - m);
+        self.cursor = r.end - m;
+    }
+
+    /// The `==highlight==` the selection is in: its whole span, its text, and its colour name
+    /// ("" for plain `==text==`).
+    pub fn highlight_around(&self) -> Option<(Range<usize>, Range<usize>, String)> {
+        let r = self.selection()?;
+        let (ls, le) = self.line_bounds(r.start);
+        let line = &self.text[ls..le];
+        crate::markdown::highlights(line).into_iter().find_map(|h| {
+            let text = ls + h.text.start..ls + h.text.end;
+            (text.start <= r.start && r.end <= text.end).then(|| {
+                let open = &line[h.open.clone()];
+                let color = open.trim_start_matches('=').trim_end_matches(':').trim().to_string();
+                (ls + h.open.start..ls + h.close.end, text, color)
+            })
+        })
+    }
+
+    /// Gives the selection a colour badge (`==green:text==`, or `==text==` for yellow), changes
+    /// the colour of the badge it is in, or with `None` removes that badge. The text stays selected.
+    pub fn set_highlight(&mut self, color: Option<&str>) {
+        let Some(r) = self.selection() else { return };
+        let open = |c: &str| if c == "yellow" { "==".to_string() } else { format!("=={c}:") };
+        match (self.highlight_around(), color) {
+            (Some((span, text, _)), new) => {
+                let inner = self.text[text.clone()].to_string();
+                let (head, tail) = match new {
+                    Some(c) => (open(c), "==".to_string()),
+                    None => (String::new(), String::new()),
+                };
+                self.replace(span.clone(), &format!("{head}{inner}{tail}"), EditKind::Other);
+                let start = span.start + head.len() + (r.start - text.start);
+                self.anchor = Some(start);
+                self.cursor = start + (r.end - r.start);
+            }
+            (None, Some(c)) => {
+                let head = open(c);
+                let inner = self.text[r.clone()].to_string();
+                self.replace(r.clone(), &format!("{head}{inner}=="), EditKind::Other);
+                self.anchor = Some(r.start + head.len());
+                self.cursor = r.start + head.len() + inner.len();
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// The `{red: text}` colour the selection is in: its whole span, its text, its colour name.
+    pub fn text_color_around(&self) -> Option<(Range<usize>, Range<usize>, String)> {
+        let r = self.selection()?;
+        let (ls, le) = self.line_bounds(r.start);
+        let line = &self.text[ls..le];
+        crate::markdown::text_colors(line).into_iter().find_map(|h| {
+            let text = ls + h.text.start..ls + h.text.end;
+            (text.start <= r.start && r.end <= text.end)
+                .then(|| (ls + h.open.start..ls + h.close.end, text, crate::markdown::HIGHLIGHTS[h.color].to_string()))
+        })
+    }
+
+    /// Colours the selected text (`{red: text}`), changes the colour it has, or with `None`
+    /// takes it off. The text stays selected.
+    pub fn set_text_color(&mut self, color: Option<&str>) {
+        let Some(r) = self.selection() else { return };
+        match (self.text_color_around(), color) {
+            (Some((span, text, _)), new) => {
+                let inner = self.text[text.clone()].to_string();
+                let head = new.map_or(String::new(), |c| format!("{{{c}: "));
+                let tail = if new.is_some() { "}" } else { "" };
+                self.replace(span.clone(), &format!("{head}{inner}{tail}"), EditKind::Other);
+                let start = span.start + head.len() + (r.start - text.start);
+                self.anchor = Some(start);
+                self.cursor = start + (r.end - r.start);
+            }
+            (None, Some(c)) => {
+                let head = format!("{{{c}: ");
+                let inner = self.text[r.clone()].to_string();
+                self.replace(r.clone(), &format!("{head}{inner}}}"), EditKind::Other);
+                self.anchor = Some(r.start + head.len());
+                self.cursor = r.start + head.len() + inner.len();
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Turns the selection into a link, `[text](https://)`, with the address selected to type
+    /// or paste over.
+    pub fn link(&mut self) {
+        let Some(r) = self.selection() else { return };
+        let inner = self.text[r.clone()].to_string();
+        self.replace(r.clone(), &format!("[{inner}](https://)"), EditKind::Other);
+        let url = r.start + inner.len() + 3;
+        self.anchor = Some(url);
+        self.cursor = url + "https://".len();
+    }
+
+    /// Turns the edits grouped since the last step into a compact history step, dropping the
+    /// full copy of the text kept meanwhile. Called as a new group starts, before undo and redo,
+    /// and when the note goes idle.
+    pub fn fold(&mut self) {
+        let Some(before) = self.pending.take() else { return };
+        if before.text == self.text {
+            return;
+        }
+        let (start, len, old) = diff(&before.text, &self.text);
+        self.undo.push(Change { start, len, old, cursor: before.cursor, anchor: before.anchor });
+        let mut bytes: usize = self.undo.iter().map(|c| c.old.len()).sum();
+        while self.undo.len() > UNDO_LIMIT || (bytes > UNDO_BYTES && self.undo.len() > 1) {
+            bytes -= self.undo.remove(0).old.len();
+        }
+    }
+
+    /// Applies `c` and returns the step that reverses it.
+    fn apply(&mut self, c: Change) -> Change {
+        let end = (c.start + c.len).min(self.text.len());
+        let now = self.text[c.start..end].to_string();
+        self.text.replace_range(c.start..end, &c.old);
+        let back = Change { start: c.start, len: c.old.len(), old: now, cursor: self.cursor, anchor: self.anchor };
+        self.cursor = c.cursor.min(self.text.len());
+        self.anchor = c.anchor.map(|a| a.min(self.text.len()));
+        self.last_edit = None;
+        back
+    }
+
     pub fn undo(&mut self) {
-        if let Some(s) = self.undo.pop() {
-            self.redo.push(self.snapshot());
-            self.restore(s);
+        self.fold();
+        if let Some(c) = self.undo.pop() {
+            let back = self.apply(c);
+            self.redo.push(back);
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(s) = self.redo.pop() {
-            self.undo.push(self.snapshot());
-            self.restore(s);
+        self.fold();
+        if let Some(c) = self.redo.pop() {
+            let back = self.apply(c);
+            self.undo.push(back);
         }
-    }
-
-    fn restore(&mut self, s: Snapshot) {
-        self.text = s.text;
-        self.cursor = s.cursor.min(self.text.len());
-        self.anchor = s.anchor.map(|a| a.min(self.text.len()));
-        self.last_edit = None;
     }
 
     // ---- motion ---------------------------------------------------------------------------
@@ -417,6 +582,60 @@ fn after_removal(p: usize, r: &Range<usize>) -> usize {
 mod tests {
     use super::*;
 
+    fn selected(text: &str, word: &str) -> Doc {
+        let mut d = Doc::new(text.to_string());
+        let at = text.find(word).unwrap();
+        d.anchor = Some(at);
+        d.cursor = at + word.len();
+        d
+    }
+
+    #[test]
+    fn toolbar_text_colour_and_link() {
+        let mut d = selected("call is late now", "late");
+        d.set_text_color(Some("red"));
+        assert_eq!(d.text, "call is {red: late} now");
+        assert_eq!(d.selected_text(), Some("late"));
+        d.set_text_color(Some("blue"));
+        assert_eq!(d.text, "call is {blue: late} now");
+        d.set_text_color(None);
+        assert_eq!(d.text, "call is late now");
+        let mut d = selected("read the docs", "docs");
+        d.link();
+        assert_eq!(d.text, "read the [docs](https://)");
+        assert_eq!(d.selected_text(), Some("https://"));
+    }
+
+    #[test]
+    fn toolbar_toggles_formatting() {
+        let mut d = selected("ship it now", "it");
+        d.toggle_wrap("**");
+        assert_eq!(d.text, "ship **it** now");
+        assert_eq!(d.selected_text(), Some("it"));
+        assert!(d.is_wrapped("**"));
+        d.toggle_wrap("**");
+        assert_eq!(d.text, "ship it now");
+        assert_eq!(d.selected_text(), Some("it"));
+        d.undo();
+        assert_eq!(d.text, "ship **it** now", "one undo per toggle");
+    }
+
+    #[test]
+    fn toolbar_sets_changes_and_removes_colours() {
+        let mut d = selected("deal is won today", "won");
+        d.set_highlight(Some("green"));
+        assert_eq!(d.text, "deal is ==green:won== today");
+        assert_eq!(d.selected_text(), Some("won"));
+        d.set_highlight(Some("red"));
+        assert_eq!(d.text, "deal is ==red:won== today");
+        d.set_highlight(Some("yellow"));
+        assert_eq!(d.text, "deal is ==won== today");
+        assert_eq!(d.highlight_around().map(|h| h.2), Some(String::new()));
+        d.set_highlight(None);
+        assert_eq!(d.text, "deal is won today");
+        assert_eq!(d.selected_text(), Some("won"));
+    }
+
     fn doc(text: &str) -> Doc {
         let mut d = Doc::new(text.to_string());
         d.cursor = d.text.len();
@@ -454,6 +673,35 @@ mod tests {
         let mut d = doc("- [ ] ");
         d.backspace(false);
         assert_eq!(d.text, "");
+    }
+
+    #[test]
+    fn history_keeps_only_what_changed() {
+        let big = "x".repeat(100_000);
+        let mut d = doc(&big);
+        for i in 0..150 {
+            d.cursor = 50_000 + 2 * i;
+            d.anchor = None;
+            d.replace(d.cursor..d.cursor, "é", EditKind::Other);
+        }
+        d.fold();
+        assert!(d.pending.is_none());
+        let kept: usize = d.undo.iter().map(|c| c.old.len() + std::mem::size_of::<Change>()).sum();
+        assert!(kept < 16 * 1024, "history holds {kept} bytes, not copies of the note");
+        for _ in 0..150 {
+            d.undo();
+        }
+        assert_eq!(d.text, big);
+        d.redo();
+        assert_eq!(d.text.len(), big.len() + "é".len());
+    }
+
+    #[test]
+    fn diff_finds_the_changed_part() {
+        assert_eq!(diff("hello world", "hello brave world"), (6, 6, String::new()));
+        assert_eq!(diff("aaa", "aa"), (2, 0, "a".to_string()));
+        assert_eq!(diff("café", "cafe"), (3, 1, "é".to_string()));
+        assert_eq!(diff("ab", "ab"), (2, 0, String::new()));
     }
 
     #[test]

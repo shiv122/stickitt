@@ -79,13 +79,13 @@ const DEMOS: [Demo; 7] = [
     },
     Demo {
         icon: "💼",
-        body: "# Q3 pipeline\nReview with **Dana** on Friday\n| Deal | Stage | Value |\n| --- | --- | --- |\n\
+        body: "# Q3 pipeline\n> 💡 Review with **Dana** on {red: Friday}\n| Deal | Stage | Value |\n| --- | --- | ---: |\n\
                | Acme Corp | ==blue:Proposal== | $48k |\n| Brightline | ==green:Won== | $61k |\n\
                | Kestrel Labs | ==yellow:Discovery== | $15k |\n| Novatek | ==red:At risk== | $9.8k |",
         color: "Amber",
         work: true,
         compact: false,
-        size: (380.0, 330.0),
+        size: (400.0, 360.0),
     },
 ];
 
@@ -99,7 +99,7 @@ enum Subject {
     Dock(View, bool),
 }
 
-const SCENES: [(&str, Subject); 11] = [
+const SCENES: [(&str, Subject); 15] = [
     ("note", Subject::Note(0, None)),
     ("note-menu", Subject::Note(0, Some("more"))),
     ("note-reminder", Subject::Note(0, Some("remind"))),
@@ -107,6 +107,10 @@ const SCENES: [(&str, Subject); 11] = [
     ("note-window", Subject::Note(0, Some("window"))),
     ("note-table", Subject::Note(6, None)),
     ("note-ringing", Subject::Note(0, Some("ring"))),
+    ("note-format", Subject::Note(6, Some("format"))),
+    ("note-table-edit", Subject::Note(6, Some("edit-table"))),
+    ("note-row-menu", Subject::Note(6, Some("row-menu"))),
+    ("note-col-menu", Subject::Note(6, Some("col-menu"))),
     ("compact", Subject::Compact),
     ("dock", Subject::Dock(View::Detailed, false)),
     ("dock-icons", Subject::Dock(View::Icons, false)),

@@ -33,6 +33,17 @@ impl Desktops {
     pub fn of_foreground(&self) -> Option<String> {
         self.inner.of_foreground()
     }
+
+    /// Every desktop, in order, as (id, name): the user's names where they gave one (Windows),
+    /// else "Desktop 1", "Desktop 2"…. Empty where the OS doesn't say.
+    pub fn list(&self) -> Vec<(String, String)> {
+        self.inner
+            .list()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, name))| (id, name.unwrap_or(format!("Desktop {}", i + 1))))
+            .collect()
+    }
 }
 
 /// Shows `window` on every desktop (macOS: every Space, full-screen apps included), or only on
@@ -118,7 +129,62 @@ mod imp {
             let fg = unsafe { GetForegroundWindow() };
             (fg != 0).then(|| self.of(fg)).flatten()
         }
+
+        /// The desktops Explorer lists (`VirtualDesktopIDs`, 16-byte GUIDs in order) with the
+        /// names the user gave them.
+        pub fn list(&self) -> Vec<(String, Option<String>)> {
+            const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops";
+            let Some(ids) = registry(KEY, "VirtualDesktopIDs", RRF_RT_REG_BINARY) else { return Vec::new() };
+            ids.chunks_exact(16)
+                .map(|b| {
+                    let g = GUID {
+                        data1: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        data2: u16::from_le_bytes([b[4], b[5]]),
+                        data3: u16::from_le_bytes([b[6], b[7]]),
+                        data4: [b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]],
+                    };
+                    let id = format_guid(&g);
+                    let name = registry(&format!("{KEY}\\Desktops\\{id}"), "Name", RRF_RT_REG_SZ).and_then(|raw| {
+                        let wide: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                        let name = String::from_utf16_lossy(&wide).trim_end_matches('\0').trim().to_string();
+                        (!name.is_empty()).then_some(name)
+                    });
+                    (id, name)
+                })
+                .collect()
+        }
     }
+
+    /// A value under HKEY_CURRENT_USER, as raw bytes.
+    fn registry(key: &str, value: &str, kind: u32) -> Option<Vec<u8>> {
+        use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (key, value) = (wide(key), wide(value));
+        let mut len = 0u32;
+        // SAFETY: valid NUL-terminated strings; a size query first, then the read into a buffer of that size.
+        unsafe {
+            if RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), kind, null_mut(), null_mut(), &mut len)
+                != 0
+            {
+                return None;
+            }
+            let mut buf = vec![0u8; len as usize];
+            let status = RegGetValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                value.as_ptr(),
+                kind,
+                null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+            );
+            (status == 0).then(|| {
+                buf.truncate(len as usize);
+                buf
+            })
+        }
+    }
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_BINARY, RRF_RT_REG_SZ};
 
     impl Drop for Manager {
         fn drop(&mut self) {
@@ -297,6 +363,47 @@ mod imp {
             let space = unsafe { (f.active)(f.conn) };
             (space != 0).then(|| space.to_string())
         }
+
+        /// Every desktop Space, display by display (full-screen app Spaces left out).
+        pub fn list(&self) -> Vec<(String, Option<String>)> {
+            type Managed = unsafe extern "C" fn(i32) -> *mut AnyObject;
+            let Some(f) = &self.0 else { return Vec::new() };
+            // SAFETY: the signature matches CoreGraphics' declaration; it returns a +1 CFArray.
+            let Some(copy) = (unsafe { lookup::<Managed>(c"CGSCopyManagedDisplaySpaces") }) else { return Vec::new() };
+            let Some(displays) = (unsafe { Retained::from_raw(copy(f.conn)) }) else { return Vec::new() };
+            let key = |k: &CStr| -> Option<Retained<AnyObject>> {
+                unsafe { msg_send![class!(NSString), stringWithUTF8String: k.as_ptr()] }
+            };
+            let (Some(spaces_key), Some(type_key), Some(id_key)) = (key(c"Spaces"), key(c"type"), key(c"id64")) else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            unsafe {
+                let n: usize = msg_send![&*displays, count];
+                for i in 0..n {
+                    let display: *mut AnyObject = msg_send![&*displays, objectAtIndex: i];
+                    let spaces: *mut AnyObject = msg_send![display, objectForKey: &*spaces_key];
+                    if spaces.is_null() {
+                        continue;
+                    }
+                    let m: usize = msg_send![spaces, count];
+                    for j in 0..m {
+                        let space: *mut AnyObject = msg_send![spaces, objectAtIndex: j];
+                        let kind: *mut AnyObject = msg_send![space, objectForKey: &*type_key];
+                        let id: *mut AnyObject = msg_send![space, objectForKey: &*id_key];
+                        if kind.is_null() || id.is_null() {
+                            continue;
+                        }
+                        let kind: i32 = msg_send![kind, intValue];
+                        if kind == 0 {
+                            let id: u64 = msg_send![id, unsignedLongLongValue];
+                            out.push((id.to_string(), None));
+                        }
+                    }
+                }
+            }
+            out
+        }
     }
 }
 
@@ -326,5 +433,21 @@ mod imp {
         pub fn of_foreground(&self) -> Option<String> {
             None
         }
+        pub fn list(&self) -> Vec<(String, Option<String>)> {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn reads_the_desktop_list() {
+        // Explorer's list: whatever this machine has, each a braced GUID.
+        let list = super::Desktops::new().list();
+        for (id, _) in &list {
+            assert!(id.starts_with('{') && id.ends_with('}') && id.len() == 38, "{id}");
+        }
+        eprintln!("desktops: {list:?}");
     }
 }

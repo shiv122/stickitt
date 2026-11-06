@@ -49,6 +49,8 @@ const TABLE_RULE: f32 = 1.0;
 /// Table rows are this much taller than a line of text, and columns at least this wide (Notion's
 /// roomy, light grid).
 const TABLE_ROW: f32 = 11.0;
+/// The note tint behind each of `markdown::HIGHLIGHTS` (Notion's background colours).
+const HIGHLIGHT_TINT: [u16; 9] = [0, 5, 8, 6, 3, 2, 4, 1, 7];
 const TABLE_MIN_COL: f32 = 64.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,6 +115,11 @@ pub enum Cmd {
     Delete,
     Quit,
     OpenSettings,
+    /// Move the note to this virtual desktop (an id from `Desktops::list`).
+    MoveToDesktop(String),
+    /// A click on the note's shadow, outside its card, at this screen point (physical): it is
+    /// meant for the note under it (notes' shadows overlap when they sit close together).
+    PassClick(i32, i32),
 }
 
 pub struct Shared {
@@ -166,6 +173,8 @@ enum Deco {
     Rule,
     /// A `==highlight==`: a soft badge in one of `markdown::HIGHLIGHTS`.
     Badge(u8),
+    /// A callout (`> 💡 text`): a soft box behind the line.
+    Callout,
 }
 
 impl Deco {
@@ -189,6 +198,13 @@ struct Table {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Popover {
+    /// The formatting toolbar over selected text; `colors` shows the badge colours.
+    Format {
+        colors: bool,
+    },
+    /// A table row's menu (the row as in `table::Grid`), or a column's.
+    TableRow(u16),
+    TableCol(u16),
     Icons,
     /// The note menu: move to list, compact view, delete.
     More,
@@ -232,6 +248,18 @@ enum PopHit {
     RemindSet,
     RemindRepeat(usize),
     RemindClear,
+    /// Move the note to the desktop at this index of `desktop_list`.
+    Desktop(u8),
+    /// The formatting toolbar: Bold, Italic, Strikethrough, Code (by index).
+    Fmt(u8),
+    /// Opens or closes the toolbar's colours.
+    FmtColors,
+    /// A badge colour (an index into `markdown::HIGHLIGHTS`), or 255 for none.
+    FmtColor(u8),
+    /// A text colour (as `FmtColor`).
+    FmtTextColor(u8),
+    /// A table row or column menu item (see `table_menu_action`).
+    TableOp(u8),
     /// Window mode.
     Mode(u8),
 }
@@ -313,6 +341,8 @@ pub struct Note {
     /// Last known virtual desktop. Windows forgets the desktop of a hidden window, so the dock
     /// uses this to file hidden notes under the right desktop.
     pub desktop: Option<String>,
+    /// The desktops the note menu offers to move it to (id, name); kept up to date by the app.
+    pub desktop_list: Vec<(String, String)>,
     /// Fading out after ×; the window is hidden once the fade ends.
     hiding: bool,
     /// Follows the system appearance.
@@ -321,6 +351,9 @@ pub struct Note {
     pub last_active: Instant,
     /// Last time the note was focused, pointed at or otherwise in use: `[notes.fade]` counts from here.
     in_use_at: Instant,
+    /// Where the note last really was on screen (physical, top-left): what gets saved. A
+    /// minimized window reports -32000, which must never be saved as its place.
+    placed_at: Option<(i32, i32)>,
 
     /// The text, one buffer line per paragraph. Only lines near the view keep their shaping
     /// and layout (tens of bytes per glyph); the rest are freed and re-shaped when scrolled to.
@@ -345,6 +378,20 @@ pub struct Note {
     goal_x: Option<f32>,
     decos: Vec<(std::ops::Range<usize>, Deco)>,
     tables: Vec<Table>,
+    /// Tables as painted (window coordinates) with the display offset of their first row, and
+    /// the one the pointer is near (it shows + buttons to add a row or a column).
+    table_rects: Vec<(gfx::Rect, usize)>,
+    table_hover: Option<usize>,
+    /// Each painted table's rows (window y, height) and column widths, the cell the pointer is
+    /// over (row as in `table::Grid`, column), its row and column handles (with the table's
+    /// first-row offset, row, column), and the table whose menu is open (with its handle).
+    table_geo: Vec<TableDraw>,
+    table_cell: Option<(usize, usize)>,
+    table_handles: Option<(gfx::Rect, gfx::Rect, usize, usize, usize)>,
+    table_menu: Option<(usize, gfx::Rect)>,
+    /// Measured table cell widths by text and font size: typing in a big table re-measures only
+    /// the cell being typed in.
+    cell_widths: std::collections::HashMap<(String, u32), f32>,
     /// Caret line the current layout was built for (its list syntax is shown raw).
     layout_caret_line: Option<usize>,
 
@@ -420,6 +467,16 @@ fn contains(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
 
+/// Whether a note whose top-left is at `pos` (physical) shows on one of `monitors`: enough of
+/// its top strip to grab it.
+fn on_screen(monitors: impl Iterator<Item = winit::monitor::MonitorHandle>, (x, y): (i32, i32)) -> bool {
+    let (gx, gy) = (x + 60, y + 16);
+    monitors.into_iter().any(|m| {
+        let (p, s) = (m.position(), m.size());
+        gx >= p.x && gy >= p.y && gx < p.x + s.width as i32 && gy < p.y + s.height as i32
+    })
+}
+
 impl Note {
     pub fn open(
         el: &ActiveEventLoop,
@@ -440,7 +497,10 @@ impl Note {
             // Never steal focus on launch; notes created on request are focused explicitly.
             .with_active(false)
             .with_visible(false);
-        if let Some((x, y)) = rec.pos {
+        // A saved place no monitor shows (an unplugged screen, or a minimized window's -32000 from
+        // an older version) is dropped: the system places the note instead.
+        let placed_at = rec.pos.filter(|&p| on_screen(el.available_monitors(), p));
+        if let Some((x, y)) = placed_at {
             attrs = attrs.with_position(PhysicalPosition::new(x, y));
         }
         #[cfg(windows)]
@@ -484,10 +544,12 @@ impl Note {
             shown: !rec.hidden,
             user_hidden: rec.hidden,
             desktop: rec.desktop.clone(),
+            desktop_list: Vec::new(),
             hiding: false,
             dark,
             last_active: now,
             in_use_at: now,
+            placed_at,
             buffer: Buffer::new_empty(Metrics::new(14.5, 22.0)),
             line_heights: Vec::new(),
             hot: Vec::new(),
@@ -504,6 +566,13 @@ impl Note {
             decos: Vec::new(),
             layout_caret_line: None,
             tables: Vec::new(),
+            table_rects: Vec::new(),
+            table_hover: None,
+            table_geo: Vec::new(),
+            table_cell: None,
+            table_handles: None,
+            table_menu: None,
+            cell_widths: std::collections::HashMap::new(),
             focused: false,
             editing: false,
             caret_on: true,
@@ -561,7 +630,14 @@ impl Note {
         NoteRecord {
             id: self.id,
             body: self.doc.text.clone(),
-            pos: self.window.outer_position().ok().map(|p| (p.x, p.y)),
+            pos: self.placed_at.or_else(|| {
+                let minimized = self.window.is_minimized().unwrap_or(false);
+                self.window
+                    .outer_position()
+                    .ok()
+                    .map(|p| (p.x, p.y))
+                    .filter(|&(x, y)| !minimized && x > -30000 && y > -30000)
+            }),
             size: (self.full_size.width, self.full_size.height),
             color: self.color,
             mode: self.mode as u8,
@@ -646,13 +722,25 @@ impl Note {
         if self.collapsed() {
             let w = self.compact_width(fonts) as f64;
             self.window.set_min_inner_size(None::<LogicalSize<f64>>);
-            let _ =
-                self.window.request_inner_size(LogicalSize::new(w + 2.0 * mx, self.st.compact.height as f64 + mt + mb));
+            self.resize(LogicalSize::new(w + 2.0 * mx, self.st.compact.height as f64 + mt + mb));
         } else {
-            let _ = self.window.request_inner_size(self.full_size);
+            self.resize(self.full_size);
             self.window.set_min_inner_size(Some(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1)));
         }
         self.layout_dirty = true;
+    }
+
+    /// Resizes the window keeping its top-left corner in place. AppKit keeps the bottom-left one,
+    /// so on macOS a note folding to one line would otherwise drop to the bottom of where it was
+    /// (over the note below it), and one opening would grow upwards.
+    pub fn resize(&self, size: impl Into<winit::dpi::Size>) {
+        let top_left = self.window.outer_position().ok();
+        let _ = self.window.request_inner_size(size);
+        if cfg!(target_os = "macos") {
+            if let Some(p) = top_left {
+                self.window.set_outer_position(p);
+            }
+        }
     }
 
     /// Events while shown as one line: hover, drag to move, click (or Enter) to open.
@@ -684,7 +772,9 @@ impl Note {
                     self.hovered = true;
                     self.needs_paint = true;
                 }
-                self.window.set_cursor(CursorIcon::Pointer);
+                // A hand over the pill; the shadow around it isn't clickable (clicks there pass on).
+                let icon = if self.on_card(self.pointer) { CursorIcon::Pointer } else { CursorIcon::Default };
+                self.window.set_cursor(icon);
                 if !crate::input::inside(position.x, position.y, self.window.inner_size()) {
                     self.press_at = None;
                     if std::mem::take(&mut self.hovered) {
@@ -708,6 +798,9 @@ impl Note {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if *state == ElementState::Pressed {
+                    if !self.on_card(self.pointer) {
+                        return Some(self.screen_point().map(|(x, y)| Cmd::PassClick(x, y)));
+                    }
                     self.press_at = Some(self.pointer);
                 } else if self.moving.take().is_some() {
                     self.window.set_cursor(CursorIcon::Pointer);
@@ -824,6 +917,40 @@ impl Note {
         (mx, mt, (w - 2.0 * mx).max(1.0), (h - mt - mb - self.extra_h as f32).max(1.0))
     }
 
+    /// Whether a window point is on the card (not on the shadow around it).
+    fn on_card(&self, (x, y): (f64, f64)) -> bool {
+        let (kx, ky, kw, kh) = self.card();
+        let (x, y) = (x as f32, y as f32);
+        x >= kx && x < kx + kw && y >= ky && y < ky + kh
+    }
+
+    /// The pointer on screen (physical).
+    fn screen_point(&self) -> Option<(i32, i32)> {
+        let p = self.window.outer_position().ok()?;
+        Some((p.x + self.pointer.0 as i32, p.y + self.pointer.1 as i32))
+    }
+
+    /// The card on screen (physical): where clicks are this note's.
+    pub fn card_on_screen(&self) -> Option<(i32, i32, i32, i32)> {
+        let p = self.window.outer_position().ok()?;
+        let (kx, ky, kw, kh) = self.card();
+        Some((p.x + kx as i32, p.y + ky as i32, kw as i32, kh as i32))
+    }
+
+    /// Shown as one line right now.
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed()
+    }
+
+    /// A click passed on from another note's shadow: a one-line note opens, others take focus.
+    pub fn take_click(&mut self) {
+        if self.collapsed() {
+            self.expand();
+        } else {
+            self.window.focus_window();
+        }
+    }
+
     /// Text area in physical pixels: (x, y, w, h).
     fn content_rect(&self) -> (f32, f32, f32, f32) {
         let s = self.scale();
@@ -908,6 +1035,13 @@ impl Note {
             markdown::mark(&mut flags, h.open.clone(), markdown::MARKER);
             markdown::mark(&mut flags, h.close.clone(), markdown::MARKER);
         }
+        // `{red: text}`: its syntax collapses like other marks; its text is coloured below.
+        let inks: Vec<markdown::Highlight> =
+            markdown::text_colors(&text).into_iter().filter(|h| flags[h.open.start] & markdown::CODE == 0).collect();
+        for h in &inks {
+            markdown::mark(&mut flags, h.open.clone(), markdown::MARKER);
+            markdown::mark(&mut flags, h.close.clone(), markdown::MARKER);
+        }
         if let Some(r) = preedit {
             markdown::mark(&mut flags, r, markdown::PREEDIT);
         }
@@ -940,6 +1074,15 @@ impl Note {
                 let (a, b) = (r.start.max(ls), r.end.min(le));
                 if *f != 0 && a < b {
                     list.add_span(a - ls..b - ls, &attrs_for(*f, &pal, size, line));
+                }
+            }
+            // Coloured text keeps its other styles.
+            for h in inks.iter().filter(|h| h.text.start < le && h.text.end > ls) {
+                let (a, b) = (h.text.start.max(ls), h.text.end.min(le));
+                let ink = theme::tint(HIGHLIGHT_TINT[h.color % HIGHLIGHT_TINT.len()], pal.dark).0;
+                for (q, f) in markdown::runs(&flags[a..b]) {
+                    let attrs = attrs_for(f, &pal, size, line).color(ink.text(255));
+                    list.add_span(a + q.start - ls..a + q.end - ls, &attrs);
                 }
             }
             // Table dividers stretched to line up the columns; separator rows made thin.
@@ -1117,8 +1260,7 @@ impl Note {
         use markdown::{mark, CODE, COLLAPSED, HIDDEN, MARKER};
         self.decos.clear();
         self.tables.clear();
-        // Tables: a header row, a `|---|` separator, then rows. Shown as plain text while the
-        // caret is in one.
+        // Tables: a header row, a `|---|` separator, then rows. They stay a grid while edited.
         let all: Vec<&str> = text.split('\n').collect();
         let mut in_table = vec![false; all.len()];
         let mut starts = Vec::with_capacity(all.len());
@@ -1134,11 +1276,9 @@ impl Note {
                 while j < all.len() && table_pipes(all[j]).is_some() && !is_table_separator(all[j]) {
                     j += 1;
                 }
-                if !caret_line.is_some_and(|c| (i..j).contains(&c)) {
-                    in_table[i..j].iter_mut().for_each(|t| *t = true);
-                    let rows = (i..j).map(|k| starts[k]..starts[k] + all[k].len()).collect();
-                    self.tables.push(Table { rows, cols: Vec::new() });
-                }
+                in_table[i..j].iter_mut().for_each(|t| *t = true);
+                let rows = (i..j).map(|k| starts[k]..starts[k] + all[k].len()).collect();
+                self.tables.push(Table { rows, cols: Vec::new() });
                 i = j;
             } else {
                 i += 1;
@@ -1169,6 +1309,9 @@ impl Note {
                     } else if info.is_list() && info.ordered.is_none() {
                         mark(flags, marker..marker + 1, HIDDEN);
                         self.decos.push((marker..marker + 1, Deco::Bullet));
+                    } else if markdown::is_callout(line) {
+                        mark(flags, marker..marker + 1, HIDDEN);
+                        self.decos.push((ls..le.max(ls + 1), Deco::Callout));
                     } else if trimmed.starts_with('>') {
                         mark(flags, marker..marker + 1, HIDDEN);
                         self.decos.push((marker..le.max(marker + 1), Deco::Quote));
@@ -1223,9 +1366,17 @@ impl Note {
         }
         let s = self.scale() * self.zoom as f32 / 100.0;
         let pad = TABLE_PAD * s;
-        let measure = |fonts: &mut FontSystem, f: &[Flags], r: std::ops::Range<usize>| -> f32 {
+        let cache = &mut self.cell_widths;
+        if cache.len() > 1024 {
+            cache.clear();
+        }
+        let mut measure = |fonts: &mut FontSystem, f: &[Flags], r: std::ops::Range<usize>| -> f32 {
             if r.is_empty() {
                 return 0.0;
+            }
+            let key = (text[r.clone()].to_string(), size.to_bits());
+            if let Some(&w) = cache.get(&key) {
+                return w;
             }
             let spans: Vec<(&str, Attrs)> = markdown::runs(&f[r.clone()])
                 .into_iter()
@@ -1235,7 +1386,9 @@ impl Note {
             b.set_wrap(Wrap::None);
             b.set_rich_text(spans, &attrs_for(0, pal, size, line), Shaping::Advanced, None);
             b.shape_until_scroll(fonts, false);
-            label_width(&b)
+            let w = label_width(&b);
+            cache.insert(key, w);
+            w
         };
         let pipe_w = {
             let mut b = Buffer::new_empty(Metrics::new(size, line));
@@ -1296,15 +1449,25 @@ impl Note {
             if n == 0 || cols.iter().sum::<f32>() > width - 2.0 * s {
                 continue;
             }
+            // Each cell's text starts where its column's alignment puts it.
+            let aligns = crate::table::aligns(&text[table.rows[1].clone()]);
+            let total: f32 = cols.iter().sum();
             for ((pipes, cells), ws) in rows.iter().zip(&widths) {
+                let start = |k: usize| -> f32 {
+                    let x: f32 = cols[..k].iter().sum();
+                    x + match aligns.get(k).copied().unwrap_or_default() {
+                        crate::table::Align::Left => pad,
+                        crate::table::Align::Center => (cols[k] - ws[k]) / 2.0,
+                        crate::table::Align::Right => cols[k] - pad - ws[k],
+                    }
+                };
                 for (j, &p) in pipes.iter().enumerate() {
-                    let target = match j {
-                        0 => pad,
-                        j if j < cells.len() => cols[j - 1] - ws[j - 1],
-                        _ => match cells.len() {
-                            0 => cols.iter().sum::<f32>() - pad,
-                            m => cols[m - 1] - pad - ws[m - 1] + cols[m..].iter().sum::<f32>(),
-                        },
+                    let target = match (j, cells.len()) {
+                        (0, 0) => total,
+                        (_, 0) => 0.0,
+                        (0, _) => start(0),
+                        (j, m) if j < m => start(j) - (start(j - 1) + ws[j - 1]),
+                        (_, m) => total - (start(m - 1) + ws[m - 1]),
                     };
                     spacers.push((span.start + p, (target - pipe_w) / size, j == 0));
                 }
@@ -1414,6 +1577,7 @@ impl Note {
         }
         self.validate_slash();
         self.validate_emoji();
+        self.sync_format_bar();
         self.sync_layout(&mut shared.fonts);
         self.caret_on = true;
         self.blink_at = Instant::now();
@@ -1737,8 +1901,10 @@ impl Note {
                 self.dirty = true;
                 self.needs_paint = true;
             }
-            WindowEvent::Moved(_) => {
-                if self.wiggle.is_none() {
+            WindowEvent::Moved(p) => {
+                let minimized = self.window.is_minimized().unwrap_or(false);
+                if self.wiggle.is_none() && !minimized && p.x > -30000 && p.y > -30000 {
+                    self.placed_at = Some((p.x, p.y));
                     self.dirty = true;
                 }
             }
@@ -1781,6 +1947,7 @@ impl Note {
                 }
                 self.drag_select = false;
                 self.hue_drag = false;
+                self.sync_format_bar();
                 if self.moving.take().is_some() || matches!(self.zone(self.pointer.0, self.pointer.1), Zone::Bar) {
                     self.window.set_cursor(CursorIcon::Default);
                     crate::input::show_cursor(CursorIcon::Default);
@@ -1864,6 +2031,13 @@ impl Note {
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::PageUp | NamedKey::PageDown)
         ) {
             self.goal_x = None;
+        }
+
+        if !primary {
+            if let Some(text_changed) = self.table_key(&ev.logical_key, shift) {
+                self.changed(shared, text_changed);
+                return None;
+            }
         }
 
         let doc = &mut self.doc;
@@ -1961,8 +2135,203 @@ impl Note {
             },
             _ => return self.type_text(ev, primary, shared),
         }
+        // Home, End and word jumps never leave the caret on a table's syntax.
+        if self.doc.selection().is_none() {
+            if let Some(g) = crate::table::grid_at(&self.doc.text, self.doc.cursor) {
+                self.doc.cursor = g.snap(self.doc.cursor, true);
+            }
+        }
         self.changed(shared, text_changed);
         None
+    }
+
+    /// Notion-style keys in a table: Tab and Shift+Tab move between cells (Tab past the last
+    /// cell adds a row), Enter goes to the cell below (adding a row at the bottom), the arrows
+    /// move between cells and rows, and Backspace and Delete stop at a cell's edges. Returns
+    /// whether the text changed, or None when the key is not the table's.
+    fn table_key(&mut self, key: &Key, shift: bool) -> Option<bool> {
+        let Key::Named(named) = key else { return None };
+        let grid = crate::table::grid_at(&self.doc.text, self.doc.cursor)?;
+        let (row, col) = grid.cell_of(self.doc.cursor)?;
+        let cell = grid.cells[row][col].clone();
+        let selecting = self.doc.selection().is_some();
+        let to = |g: &crate::table::Grid, r: usize, c: usize| g.caret(r, c.min(g.cells[r].len().saturating_sub(1)));
+        match named {
+            NamedKey::Tab => match grid.step(row, col, !shift) {
+                Some((r, c)) => {
+                    self.doc.move_to(to(&grid, r, c)?, false);
+                    Some(false)
+                }
+                None if !shift => {
+                    self.add_table_row(&grid, 0);
+                    Some(true)
+                }
+                None => Some(false),
+            },
+            NamedKey::Enter if !shift => {
+                match grid.below(row) {
+                    Some(r) => self.doc.move_to(to(&grid, r, col)?, false),
+                    // Enter on an empty last row takes it away and leaves the table, like
+                    // pressing Enter on an empty list item.
+                    None if row > 1 && grid.cells[row].iter().all(|c| c.is_empty()) => {
+                        let line = grid.rows[row].clone();
+                        self.doc.replace(line.start - 1..line.end, "", EditKind::Other);
+                        self.leave_table(grid.rows[row - 1].end);
+                        return Some(true);
+                    }
+                    None => {
+                        self.add_table_row(&grid, col);
+                        return Some(true);
+                    }
+                }
+                Some(false)
+            }
+            NamedKey::ArrowUp | NamedKey::ArrowDown if !shift => {
+                let down = *named == NamedKey::ArrowDown;
+                match if down { grid.below(row) } else { grid.above(row) } {
+                    Some(r) => self.doc.move_to(to(&grid, r, col)?, false),
+                    None if down => return Some(self.leave_table(grid.rows.last()?.end)),
+                    None => return None,
+                }
+                Some(false)
+            }
+            NamedKey::Escape if !selecting && !self.ringing => Some(self.leave_table(grid.rows.last()?.end)),
+            NamedKey::ArrowLeft if !shift && !selecting && self.doc.cursor <= cell.start => {
+                let (r, c) = grid.step(row, col, false)?;
+                self.doc.move_to(grid.caret(r, c)?, false);
+                Some(false)
+            }
+            NamedKey::ArrowRight if !shift && !selecting && self.doc.cursor >= cell.end => {
+                let (r, c) = grid.step(row, col, true)?;
+                self.doc.move_to(grid.cells[r][c].start, false);
+                Some(false)
+            }
+            NamedKey::Backspace if !selecting && self.doc.cursor <= cell.start => Some(false),
+            NamedKey::Delete if !selecting && self.doc.cursor >= cell.end => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Moves the caret to the line after a table that ends at `end`, adding one if the table is
+    /// the last thing in the note. Returns whether the text changed.
+    fn leave_table(&mut self, end: usize) -> bool {
+        if self.doc.text[end..].starts_with('\n') {
+            self.doc.move_to(end + 1, false);
+            false
+        } else {
+            self.doc.replace(end..end, "\n", EditKind::Other);
+            true
+        }
+    }
+
+    /// A table row or column menu item: rewrites the table (one undo step) and puts the caret
+    /// in the cell the action was about.
+    fn table_menu_action(&mut self, code: u8, shared: &mut Shared) {
+        use crate::table::{Align, Model, TableOp};
+        let (Some((first, _)), Some(pop)) = (self.table_menu, self.popover) else { return };
+        let pos = self.to_doc(first);
+        let Some(grid) = crate::table::grid_at(&self.doc.text, pos) else { return };
+        let (row, col) = match pop {
+            Popover::TableRow(r) => (r as usize, 0),
+            Popover::TableCol(c) => (0, c as usize),
+            _ => return,
+        };
+        let mut model = Model::read(&self.doc.text, &grid);
+        let (n, rows) = (model.columns(), model.rows.len());
+        // Model rows have no separator: grid row 2 is model row 1.
+        let r = row.saturating_sub(usize::from(row > 0));
+        let (op, target) = match code {
+            0 => (TableOp::InsertRow { at: r }, (r, col)),
+            1 => (TableOp::InsertRow { at: r + 1 }, (r + 1, col)),
+            2 => (TableOp::DuplicateRow(r), (r + 1, col)),
+            3 => (TableOp::MoveRow { from: r, to: r.saturating_sub(1) }, (r.saturating_sub(1), col)),
+            4 => (TableOp::MoveRow { from: r, to: (r + 1).min(rows - 1) }, ((r + 1).min(rows - 1), col)),
+            5 => (TableOp::DeleteRow(r), (r.min(rows.saturating_sub(2)), col)),
+            6 => (TableOp::DeleteTable, (0, 0)),
+            10 => (TableOp::InsertColumn { at: col }, (0, col)),
+            11 => (TableOp::InsertColumn { at: col + 1 }, (0, col + 1)),
+            12 => (TableOp::MoveColumn { from: col, to: col.saturating_sub(1) }, (0, col.saturating_sub(1))),
+            13 => (TableOp::MoveColumn { from: col, to: (col + 1).min(n - 1) }, (0, (col + 1).min(n - 1))),
+            14 => (TableOp::AlignColumn(col, Align::Left), (0, col)),
+            15 => (TableOp::AlignColumn(col, Align::Center), (0, col)),
+            16 => (TableOp::AlignColumn(col, Align::Right), (0, col)),
+            17 => (TableOp::DeleteColumn(col), (0, col.min(n.saturating_sub(2)))),
+            _ => return,
+        };
+        let span = grid.rows[0].start..grid.rows.last().map_or(0, |l| l.end);
+        if model.apply(op) {
+            self.doc.replace(span.clone(), &model.write(), EditKind::Other);
+            if let Some(g) = crate::table::grid_at(&self.doc.text, span.start) {
+                let (tr, tc) = target;
+                let grid_row = if tr == 0 { 0 } else { tr + 1 };
+                if let Some(p) = g.caret(grid_row.min(g.rows.len() - 1), tc) {
+                    self.doc.move_to(p, false);
+                }
+            }
+        } else {
+            // The whole table goes, with the line break after it.
+            let end = if self.doc.text[span.end..].starts_with('\n') { span.end + 1 } else { span.end };
+            self.doc.replace(span.start..end, "", EditKind::Other);
+        }
+        self.popover = None;
+        self.table_menu = None;
+        self.editing = true;
+        self.window.focus_window();
+        self.changed(shared, true);
+    }
+
+    /// Adds an empty row at the bottom of `grid` and puts the caret in its cell `col`.
+    fn add_table_row(&mut self, grid: &crate::table::Grid, col: usize) {
+        let Some(at) = grid.rows.last().map(|r| r.end) else { return };
+        self.doc.replace(at..at, &grid.new_row(), EditKind::Other);
+        if let Some(g) = crate::table::grid_at(&self.doc.text, at + 1) {
+            if let Some(p) = g.caret(g.rows.len() - 1, col) {
+                self.doc.move_to(p, false);
+            }
+        }
+    }
+
+    /// The + buttons on a table: a row at the bottom, or a column at the right.
+    fn table_add(&mut self, first: usize, column: bool, shared: &mut Shared) -> Option<Cmd> {
+        let pos = self.to_doc(first);
+        let grid = crate::table::grid_at(&self.doc.text, pos)?;
+        if column {
+            let span = grid.rows[0].start..grid.rows.last()?.end;
+            let mut t = self.doc.text[span.clone()].to_string();
+            for (at, cell) in grid.new_column() {
+                t.insert_str(at - span.start, &cell);
+            }
+            self.doc.replace(span, &t, EditKind::Other);
+            if let Some(g) = crate::table::grid_at(&self.doc.text, pos) {
+                if let Some(p) = g.caret(0, g.columns() - 1) {
+                    self.doc.move_to(p, false);
+                }
+            }
+        } else {
+            self.add_table_row(&grid, 0);
+        }
+        self.editing = true;
+        self.window.focus_window();
+        self.changed(shared, true);
+        None
+    }
+
+    /// Shows the formatting toolbar while text is selected (once the drag is over), hides it
+    /// when the selection goes.
+    fn sync_format_bar(&mut self) {
+        let selecting = self.focused && !self.drag_select && self.doc.selection().is_some_and(|r| !r.is_empty());
+        match (self.popover, selecting) {
+            (None, true) => {
+                self.popover = Some(Popover::Format { colors: false });
+                self.pop_hover = None;
+                self.needs_paint = true;
+            }
+            (Some(Popover::Format { .. }), false) => {
+                self.popover = None;
+                self.needs_paint = true;
+            }
+            _ => {}
+        }
     }
 
     /// Runs a user-bindable note action (see `config.rs` for names and defaults).
@@ -2134,6 +2503,9 @@ impl Note {
     /// Keys while a popover is open. `Some` means the key was consumed.
     fn popover_key(&mut self, ev: &KeyEvent, shared: &mut Shared) -> Option<Option<Cmd>> {
         let pop = self.popover?;
+        if matches!(pop, Popover::Format { .. }) {
+            return None;
+        }
         // The icon picker has its own search field: typing goes there, not into the note.
         if pop == Popover::Icons {
             match &ev.logical_key {
@@ -2256,6 +2628,45 @@ impl Note {
             PopHit::RemoveIcon => self.icon.clear(),
             PopHit::List(id) => self.list = id,
             PopHit::Color(c) => self.set_color(c),
+            PopHit::Desktop(i) => {
+                let (id, _) = self.desktop_list.get(i as usize)?.clone();
+                self.popover = None;
+                self.needs_paint = true;
+                return Some(Cmd::MoveToDesktop(id));
+            }
+            PopHit::Fmt(4) => {
+                self.doc.link();
+                self.popover = None;
+                self.changed(shared, true);
+                return None;
+            }
+            PopHit::Fmt(k) => {
+                let marker = ["**", "*", "~~", "`"][k as usize % 4];
+                self.doc.toggle_wrap(marker);
+                self.changed(shared, true);
+                return None;
+            }
+            PopHit::FmtColors => {
+                if let Some(Popover::Format { colors }) = self.popover {
+                    self.popover = Some(Popover::Format { colors: !colors });
+                }
+                self.needs_paint = true;
+                return None;
+            }
+            PopHit::FmtTextColor(c) => {
+                self.doc.set_text_color(markdown::HIGHLIGHTS.get(c as usize).copied());
+                self.changed(shared, true);
+                return None;
+            }
+            PopHit::TableOp(code) => {
+                self.table_menu_action(code, shared);
+                return None;
+            }
+            PopHit::FmtColor(c) => {
+                self.doc.set_highlight(markdown::HIGHLIGHTS.get(c as usize).copied());
+                self.changed(shared, true);
+                return None;
+            }
             PopHit::Hue => return None,
             PopHit::Compact => {
                 self.set_compact(!self.compact);
@@ -2443,6 +2854,212 @@ impl Note {
                 let strip = (x + pad, sy + strip_label, w - 2.0 * pad, strip_h);
                 d.hue = Some((strip, theme::custom_hue(self.color)));
                 d.cells.push(((strip.0, strip.1 - 6.0 * s, strip.2, strip.3 + 12.0 * s), PopHit::Hue));
+            }
+            Popover::Format { colors } => {
+                let sel = self.doc.selection()?;
+                let (a, b) = (self.cursor_at(self.to_display(sel.start)), self.cursor_at(self.to_display(sel.end)));
+                let first = *self.span_rects(a, b).first()?;
+                let (cx, cy, _, _) = self.content_rect();
+                let (btn, pad, gap, color_w, sw, cap) = (28.0 * s, 4.0 * s, 2.0 * s, 40.0 * s, 24.0 * s, 18.0 * s);
+                let row_w = 2.0 * pad + 5.0 * btn + 4.0 * gap + 9.0 * s + color_w;
+                let w = if colors { row_w.max(2.0 * pad + 10.0 * sw) } else { row_w };
+                let h = 2.0 * pad + btn + if colors { 2.0 * (cap + sw) + 6.0 * s } else { 0.0 };
+                // Above the selection, or below it when there is no room.
+                let top = cy + first.1 - self.scroll;
+                let mut y = top - h - 6.0 * s;
+                if y < ky + 4.0 * s {
+                    y = top + first.3 + 6.0 * s;
+                }
+                let x = (cx + first.0 - 6.0 * s).clamp(kx + 6.0 * s, (kx + kw - 6.0 * s - w).max(kx + 6.0 * s));
+                d.rect = (x, y, w, h);
+                let doc = &self.doc;
+                let active = [
+                    doc.is_wrapped("**"),
+                    doc.is_wrapped("*") && !doc.is_wrapped("**"),
+                    doc.is_wrapped("~~"),
+                    doc.is_wrapped("`"),
+                    false,
+                ];
+                let looks = [
+                    ("B", Weight::BOLD, false, false, false),
+                    ("I", Weight::NORMAL, true, false, false),
+                    ("S", Weight::NORMAL, false, true, false),
+                    ("</>", Weight::MEDIUM, false, false, true),
+                    ("🔗", Weight::NORMAL, false, false, false),
+                ];
+                let mut bx = x + pad;
+                for (k, (text, weight, italic, strike, mono)) in looks.into_iter().enumerate() {
+                    let r = (bx, y + pad, btn, btn);
+                    if active[k] {
+                        d.selected.push(r);
+                    }
+                    let size = if mono {
+                        11.5 * s
+                    } else if k == 4 {
+                        12.5 * s
+                    } else {
+                        14.0 * s
+                    };
+                    let b = format_label(fonts, text, size, weight, (italic, strike, mono));
+                    let at = (r.0 + (btn - label_width(&b)) / 2.0, r.1 + (btn - label_h(&b)) / 2.0);
+                    let color = if active[k] { pal.accent } else { pal.text };
+                    d.labels.push((b, color.text(255), at));
+                    d.cells.push((r, PopHit::Fmt(k as u8)));
+                    bx += btn + gap;
+                }
+                // A divider, then the colour button: the current colour and a caret.
+                d.bars.push(((bx + 2.0 * s, y + pad + 7.0 * s, 1.0 * s, btn - 14.0 * s), false));
+                bx += 9.0 * s;
+                let named = |c: String| markdown::HIGHLIGHTS.iter().position(|h| *h == c);
+                let background =
+                    doc.highlight_around().and_then(|(_, _, c)| named(if c.is_empty() { "yellow".into() } else { c }));
+                let ink = doc.text_color_around().and_then(|(_, _, c)| named(c));
+                let r = (bx, y + pad, color_w, btn);
+                if colors {
+                    d.selected.push(r);
+                }
+                let dot = background.or(ink).map_or(pal.secondary, |i| theme::tint(HIGHLIGHT_TINT[i], self.dark).0);
+                d.dots.push(((r.0 + 13.0 * s, r.1 + btn / 2.0), 6.5 * s, dot, false));
+                let caret = small_label(fonts, "▾", 11.0 * s, Weight::NORMAL);
+                let at = (r.0 + 25.0 * s, r.1 + (btn - label_h(&caret)) / 2.0);
+                d.labels.push((caret, pal.secondary.text(255), at));
+                d.cells.push((r, PopHit::FmtColors));
+                if colors {
+                    // Two rows, as in Notion: the text's colour, then its background.
+                    let outline = if self.dark { Rgb(0x55, 0x55, 0x58) } else { Rgb(0xD9, 0xD8, 0xD4) };
+                    let mut ry = y + pad + btn + 6.0 * s;
+                    for (title, text_row) in [("COLOR", true), ("BACKGROUND", false)] {
+                        let b = small_label(fonts, title, 9.5 * s, Weight::SEMIBOLD);
+                        d.labels.push((b, pal.secondary.text(220), (x + pad + 4.0 * s, ry + 4.0 * s)));
+                        ry += cap;
+                        let current = if text_row { ink } else { background };
+                        for k in 0..10 {
+                            let r = (x + pad + k as f32 * sw, ry, sw, sw);
+                            let center = (r.0 + sw / 2.0, r.1 + sw / 2.0);
+                            let hit = if k == 0 { 255 } else { k as u8 - 1 };
+                            let on = if k == 0 { current.is_none() } else { current == Some(k - 1) };
+                            if on {
+                                d.selected.push(r);
+                            }
+                            if text_row {
+                                // "A" in each colour; the first is the default colour.
+                                let color =
+                                    if k == 0 { pal.text } else { theme::tint(HIGHLIGHT_TINT[k - 1], self.dark).0 };
+                                let b = small_label(fonts, "A", 14.0 * s, Weight::SEMIBOLD);
+                                let at = (center.0 - label_width(&b) / 2.0, center.1 - label_h(&b) / 2.0);
+                                d.labels.push((b, color.text(255), at));
+                                d.cells.push((r, PopHit::FmtTextColor(hit)));
+                            } else if k == 0 {
+                                let b = small_label(fonts, "⊘", 14.0 * s, Weight::NORMAL);
+                                let at = (center.0 - label_width(&b) / 2.0, center.1 - label_h(&b) / 2.0);
+                                d.labels.push((b, pal.secondary.text(255), at));
+                                d.cells.push((r, PopHit::FmtColor(255)));
+                            } else {
+                                let (_, wash) = theme::tint(HIGHLIGHT_TINT[k - 1], self.dark);
+                                d.dots.push((center, 8.0 * s, outline, false));
+                                d.dots.push((center, 7.0 * s, wash, false));
+                                d.cells.push((r, PopHit::FmtColor(hit)));
+                            }
+                        }
+                        ry += sw;
+                    }
+                }
+            }
+            Popover::TableRow(_) | Popover::TableCol(_) => {
+                let (_, anchor) = self.table_menu?;
+                // Not placed yet (`--shots`): next to the handle under the pointer.
+                let anchor = match (anchor.2 > 0.0, self.table_handles) {
+                    (false, Some((rh, ch, ..))) => {
+                        if matches!(pop, Popover::TableRow(_)) {
+                            rh
+                        } else {
+                            ch
+                        }
+                    }
+                    _ => anchor,
+                };
+                let row = matches!(pop, Popover::TableRow(_));
+                let (item, pad, w) = (28.0 * s, 6.0 * s, 176.0 * s);
+                // Items as (label, op code, danger); None is a divider.
+                let items: Vec<Option<(&str, u8, bool)>> = if row {
+                    vec![
+                        Some(("Insert above", 0, false)),
+                        Some(("Insert below", 1, false)),
+                        Some(("Duplicate", 2, false)),
+                        Some(("Move up", 3, false)),
+                        Some(("Move down", 4, false)),
+                        None,
+                        Some(("Delete row", 5, true)),
+                        Some(("Delete table", 6, true)),
+                    ]
+                } else {
+                    vec![
+                        Some(("Insert left", 10, false)),
+                        Some(("Insert right", 11, false)),
+                        Some(("Move left", 12, false)),
+                        Some(("Move right", 13, false)),
+                        None,
+                        Some(("Delete column", 17, true)),
+                    ]
+                };
+                let dividers = items.iter().filter(|i| i.is_none()).count() as f32;
+                let aligns_h = if row { 0.0 } else { item + 20.0 * s };
+                let h = 2.0 * pad + (items.len() as f32 - dividers) * item + dividers * 9.0 * s + aligns_h;
+                let (x, y) = if row {
+                    (anchor.0 + anchor.2 + 6.0 * s, anchor.1 - 8.0 * s)
+                } else {
+                    (anchor.0 + anchor.2 / 2.0 - w / 2.0, anchor.1 + anchor.3 + 6.0 * s)
+                };
+                let x = x.clamp(kx + 6.0 * s, (kx + kw - 6.0 * s - w).max(kx + 6.0 * s));
+                let y = y.clamp(ky + 6.0 * s, (ky + kh - 6.0 * s - h).max(ky + 6.0 * s));
+                d.rect = (x, y, w, h);
+                let mut iy = y + pad;
+                if !row {
+                    // Alignment: three chips, the current one selected.
+                    let current = self.table_menu.and_then(|(first, _)| {
+                        let g = crate::table::grid_at(&self.doc.text, self.to_doc(first))?;
+                        let c = match pop {
+                            Popover::TableCol(c) => c as usize,
+                            _ => 0,
+                        };
+                        crate::table::aligns(&self.doc.text[g.rows.get(1)?.clone()]).get(c).copied()
+                    });
+                    let b = small_label(fonts, "ALIGN", 9.5 * s, Weight::SEMIBOLD);
+                    d.labels.push((b, pal.secondary.text(220), (x + pad + 4.0 * s, iy + 2.0 * s)));
+                    iy += 16.0 * s;
+                    let cw = (w - 2.0 * pad - 8.0 * s) / 3.0;
+                    for (k, (label, code)) in [("Left", 14u8), ("Center", 15), ("Right", 16)].into_iter().enumerate() {
+                        let r = (x + pad + k as f32 * (cw + 4.0 * s), iy, cw, item - 4.0 * s);
+                        let on = current.unwrap_or_default()
+                            == [crate::table::Align::Left, crate::table::Align::Center, crate::table::Align::Right][k];
+                        if on {
+                            d.selected.push(r);
+                        } else {
+                            d.tiles.push(r);
+                        }
+                        let b = small_label(fonts, label, 12.0 * s, Weight::MEDIUM);
+                        let at = (r.0 + (r.2 - label_width(&b)) / 2.0, r.1 + (r.3 - label_h(&b)) / 2.0);
+                        d.labels.push((b, if on { pal.accent } else { pal.text }.text(255), at));
+                        d.cells.push((r, PopHit::TableOp(code)));
+                    }
+                    iy += item + 4.0 * s;
+                }
+                for it in items {
+                    match it {
+                        None => {
+                            d.bars.push(((x + 10.0 * s, iy + 4.0 * s, w - 20.0 * s, 1.0 * s), false));
+                            iy += 9.0 * s;
+                        }
+                        Some((label, code, danger)) => {
+                            let r = (x + pad, iy, w - 2.0 * pad, item);
+                            let b = small_label(fonts, label, 13.0 * s, Weight::NORMAL);
+                            let at = (r.0 + 10.0 * s, r.1 + (item - label_h(&b)) / 2.0);
+                            d.labels.push((b, if danger { pal.alert } else { pal.text }.text(255), at));
+                            d.cells.push((r, PopHit::TableOp(code)));
+                            iy += item;
+                        }
+                    }
+                }
             }
             Popover::Window => {
                 let (row, pad, header) = (46.0 * s, 6.0 * s, 28.0 * s);
@@ -2705,7 +3322,9 @@ impl Note {
                 // guarded by a second click.
                 let (row, pad, header, sep) = (30.0 * s, 6.0 * s, 28.0 * s, 11.0 * s);
                 let w = (210.0 * s).min(kw - 24.0 * s);
-                let fixed = header + 2.0 * row + 2.0 * sep + pad;
+                let desks = if self.desktop_list.len() > 1 { self.desktop_list.len() } else { 0 };
+                let desk_h = if desks > 0 { sep + 22.0 * s + desks as f32 * row } else { 0.0 };
+                let fixed = header + 2.0 * row + 2.0 * sep + pad + desk_h;
                 let room = (ky + kh - 8.0 * s) - (ky + self.st.top_bar * s) - fixed;
                 let shown = lists.len().min((room / row).floor().max(1.0) as usize);
                 let h = fixed + shown as f32 * row;
@@ -2740,6 +3359,28 @@ impl Note {
                 let divider = |d: &mut PopDraw, at: f32| {
                     d.bars.push(((x + 10.0 * s, at + sep / 2.0, w - 20.0 * s, 1.0 * s), false))
                 };
+                if desks > 0 {
+                    // Move to another virtual desktop: just this note, without dragging it.
+                    divider(&mut d, ry);
+                    ry += sep;
+                    let t = small_label(fonts, "Move to desktop", 11.5 * s, Weight::MEDIUM);
+                    d.labels.push((t, pal.secondary.text(255), (x + 12.0 * s, ry + 4.0 * s)));
+                    ry += 22.0 * s;
+                    for (i, (id, name)) in self.desktop_list.iter().enumerate() {
+                        let r = (x + pad, ry, w - 2.0 * pad, row);
+                        let current = self.desktop.as_deref() == Some(id.as_str());
+                        let weight = if current { Weight::SEMIBOLD } else { Weight::NORMAL };
+                        let label = small_label(fonts, name, 13.5 * s, weight);
+                        let at = (r.0 + 28.0 * s, r.1 + (row - label_h(&label)) / 2.0);
+                        d.labels.push((label, pal.text.text(255), at));
+                        if current {
+                            tick(fonts, &mut d, r);
+                        } else {
+                            d.cells.push((r, PopHit::Desktop(i as u8)));
+                        }
+                        ry += row;
+                    }
+                }
                 divider(&mut d, ry);
                 ry += sep;
                 let r = (x + pad, ry, w - 2.0 * pad, row);
@@ -2817,7 +3458,7 @@ impl Note {
         };
         if need != self.extra_h {
             self.extra_h = need;
-            let _ = self.window.request_inner_size(PhysicalSize::new(size.width, base + need));
+            self.resize(PhysicalSize::new(size.width, base + need));
         }
     }
 
@@ -2940,14 +3581,18 @@ impl Note {
         } else {
             h0
         };
-        // Dragging a left or top edge moves the window so the opposite edge stays put.
+        // Dragging a left or top edge moves the window so the opposite edge stays put. The size
+        // goes first: macOS resizes from the bottom-left corner, so the place is set after it.
         let nx = if west { pos.x + w0 - w } else { pos.x };
         let ny = if north { pos.y + h0 - h } else { pos.y };
-        if (nx, ny) != (now.x, now.y) {
+        let resized = self.window.inner_size() != PhysicalSize::new(w as u32, h as u32);
+        if resized {
+            let _ = self.window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
+        }
+        if (nx, ny) != (now.x, now.y) || (resized && cfg!(target_os = "macos")) {
             self.window.set_outer_position(PhysicalPosition::new(nx, ny));
         }
-        if self.window.inner_size() != PhysicalSize::new(w as u32, h as u32) {
-            let _ = self.window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
+        if resized {
             self.layout_dirty = true;
             self.dirty = true;
             self.render(shared);
@@ -2988,6 +3633,36 @@ impl Note {
             return;
         }
         self.pointer = (x, y);
+        // Near a table: show its + buttons.
+        let m = 14.0 * self.scale();
+        let (px, py) = (x as f32, y as f32);
+        let near = self
+            .table_rects
+            .iter()
+            .position(|&((tx, ty, tw, th), _)| px >= tx - m && px <= tx + tw + m && py >= ty - m && py <= ty + th + m);
+        if near != self.table_hover {
+            self.table_hover = near;
+            self.needs_paint = true;
+        }
+        // The cell under the pointer (by row band and column), for the row and column handles.
+        let cell = near.and_then(|i| self.table_geo.get(i)).map(|(rows, cols)| {
+            let row = rows.iter().rposition(|&(top, _)| py >= top).unwrap_or(0);
+            let row = if row == 1 { 0 } else { row };
+            let tx = self.table_rects[near.unwrap_or(0)].0 .0;
+            let mut x = tx;
+            let col = cols
+                .iter()
+                .position(|w| {
+                    x += w;
+                    px < x
+                })
+                .unwrap_or(cols.len().saturating_sub(1));
+            (row, col)
+        });
+        if cell != self.table_cell {
+            self.table_cell = cell;
+            self.needs_paint = true;
+        }
         if self.moving.is_some() {
             self.carry(x, y);
             return;
@@ -3050,14 +3725,44 @@ impl Note {
         let (x, y) = self.pointer;
         let zone = self.zone(x, y);
         if self.popover.is_some() && !matches!(zone, Zone::Popover) {
-            // Like Notion: a click outside only dismisses the popover.
+            // Like Notion: a click outside only dismisses the popover (but a click away from
+            // the formatting toolbar also places the caret).
+            let toolbar = matches!(self.popover, Some(Popover::Format { .. }));
             self.popover = None;
             self.pop_hover = None;
             self.needs_paint = true;
-            return None;
+            if !toolbar {
+                return None;
+            }
+        }
+        if let Some((rh, ch, first, row, col)) = self.table_handles {
+            let (px, py) = (x as f32, y as f32);
+            let inside =
+                |r: gfx::Rect| px >= r.0 - 3.0 && px <= r.0 + r.2 + 3.0 && py >= r.1 - 3.0 && py <= r.1 + r.3 + 3.0;
+            if inside(rh) || inside(ch) {
+                let (pop, anchor) =
+                    if inside(rh) { (Popover::TableRow(row as u16), rh) } else { (Popover::TableCol(col as u16), ch) };
+                self.table_menu = Some((first, anchor));
+                self.popover = Some(pop);
+                self.pop_hover = None;
+                self.needs_paint = true;
+                return None;
+            }
+        }
+        if let Some(&(r, first)) =
+            self.table_hover.and_then(|i| self.table_rects.get(i)).filter(|_| self.st.table_buttons)
+        {
+            let s = self.scale();
+            let near = |cx: f32, cy: f32| (x as f32 - cx).hypot(y as f32 - cy) <= 11.0 * s;
+            if near(r.0 + r.2 / 2.0, r.1 + r.3) {
+                return self.table_add(first, false, shared);
+            }
+            if near(r.0 + r.2, r.1 + r.3 / 2.0) {
+                return self.table_add(first, true, shared);
+            }
         }
         match zone {
-            Zone::Outside => {}
+            Zone::Outside => return self.screen_point().map(|(x, y)| Cmd::PassClick(x, y)),
             Zone::Popover => {
                 let hit = self.pop_hits.iter().find(|(r, _)| contains(*r, x as f32, y as f32)).map(|(_, h)| *h);
                 if hit == Some(PopHit::Hue) {
@@ -3094,6 +3799,14 @@ impl Note {
                 };
                 self.last_click = Some((now, (x, y), count));
                 let off = self.hit_window(x, y);
+                let open = if cfg!(target_os = "macos") { self.mods.super_key() } else { self.mods.control_key() };
+                if open && count == 1 {
+                    let (ls, le) = self.doc.line_bounds(off);
+                    if let Some(url) = markdown::link_at(&self.doc.text[ls..le], off - ls) {
+                        crate::input::open_url(url);
+                        return None;
+                    }
+                }
                 let shift = self.mods.shift_key();
                 if let (1, false, Some((ls, le))) = (count, shift, self.checkbox_at(off)) {
                     self.doc.toggle_check_at_line(ls, le);
@@ -3106,6 +3819,20 @@ impl Note {
                     2 => self.doc.select_word_at(off),
                     3 => self.doc.select_line_at(off),
                     _ => {
+                        // Below a table that ends the note: a new line there, to write on.
+                        let (_, cy, _, _) = self.content_rect();
+                        let below = y as f32 > cy + self.content_h - self.scroll;
+                        let end = self.doc.text.len();
+                        if below && !shift && crate::table::grid_at(&self.doc.text, end).is_some() {
+                            self.leave_table(end);
+                            self.changed(shared, true);
+                            return None;
+                        }
+                        // In a table, onto the cell on that side of the divider.
+                        let off = match crate::table::grid_at(&self.doc.text, off) {
+                            Some(g) if !shift => g.nearest(off),
+                            _ => off,
+                        };
                         self.doc.move_to(off, shift);
                         self.drag_select = true;
                     }
@@ -3196,6 +3923,7 @@ impl Note {
         self.shown = true;
         self.window.set_visible(true);
         self.window.set_minimized(false);
+        self.bring_on_screen();
         self.peeking = false;
         self.apply_level();
         if focus {
@@ -3205,7 +3933,21 @@ impl Note {
         self.needs_paint = true;
     }
 
-    /// Temporarily floats the note above everything while it's hovered in the dock.
+    /// Moves the note onto the primary screen if no screen shows it (see `on_screen`).
+    fn bring_on_screen(&mut self) {
+        let Ok(pos) = self.window.outer_position() else { return };
+        if on_screen(self.window.available_monitors(), (pos.x, pos.y)) {
+            return;
+        }
+        let Some(m) = self.window.primary_monitor().or_else(|| self.window.available_monitors().next()) else { return };
+        let (mp, ms, size) = (m.position(), m.size(), self.window.outer_size());
+        let x = mp.x + (ms.width as i32 - size.width as i32).max(0) / 2;
+        let y = mp.y + (ms.height as i32 - size.height as i32).max(0) / 3;
+        self.window.set_outer_position(PhysicalPosition::new(x, y));
+        self.placed_at = Some((x, y));
+        self.dirty = true;
+    }
+
     /// Sets the note up for a `--shots` picture: light or dark, hovered (showing its controls),
     /// and with one of its menus open: "more", "remind", "colors" or "window" (or "ring": its
     /// reminder ringing, the glow at its brightest).
@@ -3218,6 +3960,33 @@ impl Note {
         self.hovered = hovered;
         self.popover = None;
         self.ringing = menu == Some("ring");
+        if let Some(at) = self.doc.text.find("Won").filter(|_| menu == Some("format")) {
+            // Text selected, with the formatting toolbar and its colours open.
+            self.doc.anchor = Some(at);
+            self.doc.cursor = at + 3;
+            self.focused = true;
+            self.popover = Some(Popover::Format { colors: true });
+            self.layout_dirty = true;
+        }
+        if let Some(first) = self.doc.text.find("| Deal").filter(|_| matches!(menu, Some("row-menu" | "col-menu"))) {
+            // A table's row or column menu open (anchored to its handle once laid out).
+            let row = menu == Some("row-menu");
+            self.table_hover = Some(0);
+            self.table_cell = Some((2, if row { 0 } else { 2 }));
+            self.table_menu = Some((first, (0.0, 0.0, 0.0, 0.0)));
+            self.popover = Some(if row { Popover::TableRow(2) } else { Popover::TableCol(2) });
+            self.layout_dirty = true;
+        }
+        if let Some(at) = self.doc.text.find("Acme Corp").filter(|_| menu == Some("edit-table")) {
+            // Typing in a cell, the pointer near the table (its + buttons showing).
+            self.doc.anchor = None;
+            self.doc.cursor = at + "Acme Corp".len();
+            self.focused = true;
+            self.editing = true;
+            self.caret_on = true;
+            self.table_hover = Some(0);
+            self.layout_dirty = true;
+        }
         if self.ringing {
             self.ring_at = Instant::now() - Duration::from_secs_f32(PULSE / 2.0);
         }
@@ -3267,6 +4036,17 @@ impl Note {
         Some(self.in_use_at + Duration::from_secs_f32(f.after.max(1.0)))
     }
 
+    /// While the app is idle: free the window's pixel buffer (made again at the next paint),
+    /// fold the undo history into compact steps, and keep the table width cache small.
+    pub fn trim(&mut self) {
+        self.surface.trim();
+        self.doc.fold();
+        if self.cell_widths.len() > 256 {
+            self.cell_widths.clear();
+        }
+    }
+
+    /// Temporarily floats the note above everything while it's hovered in the dock.
     pub fn peek(&mut self, on: bool) {
         self.peeking = on;
         self.apply_level();
@@ -3486,15 +4266,45 @@ impl Note {
             (kx + kw - 7.0 * s, y, 3.0 * s, thumb)
         });
         // Tables: each row's top and height, and the column widths.
-        let tables: Vec<TableDraw> = self
-            .tables
+        let shown: Vec<&Table> = self.tables.iter().filter(|t| !t.cols.is_empty()).collect();
+        let tables: Vec<TableDraw> = shown
             .iter()
-            .filter(|t| !t.cols.is_empty())
             .map(|t| {
                 let rows = t.rows.iter().filter_map(|r| self.caret_geom(r.start).map(|(_, top, h)| (top, h))).collect();
                 (rows, t.cols.clone())
             })
             .collect();
+        // Where each table is on screen, for the + buttons shown near it.
+        let rects: Vec<(gfx::Rect, usize)> = tables
+            .iter()
+            .zip(&shown)
+            .filter_map(|((rows, cols), t)| {
+                let (&(top, _), &(last, lh)) = (rows.first()?, rows.last()?);
+                let (y0, y1) = (cy + top - self.scroll, cy + last + lh - self.scroll);
+                Some(((cx, y0, cols.iter().sum(), y1 - y0), t.rows[0].start))
+            })
+            .collect();
+        self.table_rects = rects;
+        self.table_geo = tables
+            .iter()
+            .map(|(rows, cols)| (rows.iter().map(|&(t, h)| (cy + t - self.scroll, h)).collect(), cols.clone()))
+            .collect();
+        let plus = self
+            .table_hover
+            .and_then(|i| self.table_rects.get(i))
+            .map(|&(r, _)| r)
+            .filter(|_| self.hovered && self.st.table_buttons);
+        // Handles for the row and column under the pointer: ⋮⋮ left of the row, ⋯ above the column.
+        self.table_handles =
+            self.table_hover.zip(self.table_cell).filter(|_| self.hovered).and_then(|(i, (row, col))| {
+                let (&((tx, ty, _, _), first), (rows, cols)) = (self.table_rects.get(i)?, self.table_geo.get(i)?);
+                let &(ry, rh) = rows.get(row)?;
+                let cx0 = tx + cols[..col.min(cols.len())].iter().sum::<f32>();
+                let row_h = (tx - 16.0 * s, ry + (rh - 18.0 * s) / 2.0, 12.0 * s, 18.0 * s);
+                let col_h = (cx0 + cols.get(col)? / 2.0 - 9.0 * s, ty - 6.0 * s, 18.0 * s, 12.0 * s);
+                Some((row_h, col_h, first, row, col))
+            });
+        let handles = self.table_handles.map(|(r, c, ..)| (r, c));
         let mut decos: Vec<(gfx::Rect, Deco, f32)> = Vec::new();
         for (r, d) in &self.decos {
             let rects = self.span_rects(self.cursor_at(r.start), self.cursor_at(r.end));
@@ -3615,10 +4425,13 @@ impl Note {
                         Deco::Quote => {
                             (gfx::rounded_rect(cx + x, y + 3.0 * s, 3.0 * s, lh - 6.0 * s, 1.5 * s), pal.text, 230)
                         }
+                        Deco::Callout => {
+                            let p = gfx::rounded_rect(cx - 8.0 * s, y - 2.0 * s, cw + 16.0 * s, lh + 4.0 * s, 8.0 * s);
+                            (p, pal.text, pal.soft + 4)
+                        }
                         Deco::Badge(c) => {
                             // Notion's background colours: the matching note tints' washes.
-                            const TINT: [u16; 9] = [0, 5, 8, 6, 3, 2, 4, 1, 7];
-                            let (_, wash) = theme::tint(TINT[c as usize % TINT.len()], pal.dark);
+                            let (_, wash) = theme::tint(HIGHLIGHT_TINT[c as usize % HIGHLIGHT_TINT.len()], pal.dark);
                             let ph = (font_px * 1.4).min(lh);
                             let p = gfx::rounded_rect(cx + x - 3.0 * s, y + (lh - ph) / 2.0, rw + 6.0 * s, ph, 5.0 * s);
                             (p, wash, 255)
@@ -3660,6 +4473,38 @@ impl Note {
                     for c in cols {
                         x += c;
                         gfx::fill_rect(&mut pm, x - hair, y0, hair, y1 - y0, ink, line_a);
+                    }
+                }
+                if let Some((row_h, col_h)) = handles {
+                    for (r, vertical) in [(row_h, true), (col_h, false)] {
+                        if let Some(p) = gfx::rounded_rect(r.0, r.1, r.2, r.3, 3.0 * s) {
+                            gfx::fill_path(&mut pm, &p, pal.base, 255);
+                            gfx::stroke_path(&mut pm, &p, 1.0 * s, pal.text, 50);
+                        }
+                        // Grip dots: 2 × 3 for a row, 3 × 2 for a column.
+                        let (nx, ny) = if vertical { (2, 3) } else { (3, 2) };
+                        let gap = 3.6 * s;
+                        for i in 0..nx {
+                            for j in 0..ny {
+                                let dx = r.0 + r.2 / 2.0 + (i as f32 - (nx - 1) as f32 / 2.0) * gap;
+                                let dy = r.1 + r.3 / 2.0 + (j as f32 - (ny - 1) as f32 / 2.0) * gap;
+                                if let Some(c) = gfx::circle(dx, dy, 1.1 * s) {
+                                    gfx::fill_path(&mut pm, &c, pal.secondary, 230);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((tx, ty, tw, th)) = plus {
+                    // Add a row (bottom edge) or a column (right edge).
+                    for (bx, by) in [(tx + tw / 2.0, ty + th), (tx + tw, ty + th / 2.0)] {
+                        if let Some(c) = gfx::circle(bx, by, 9.0 * s) {
+                            gfx::fill_path(&mut pm, &c, pal.base, 255);
+                            gfx::stroke_path(&mut pm, &c, 1.0 * s, pal.text, 60);
+                        }
+                        let (l, t) = (4.5 * s, 1.4 * s);
+                        gfx::fill_rect(&mut pm, bx - l, by - t / 2.0, 2.0 * l, t, pal.secondary, 255);
+                        gfx::fill_rect(&mut pm, bx - t / 2.0, by - l, t, 2.0 * l, pal.secondary, 255);
                     }
                 }
                 for &(x, y, rw, rh) in &sel_rects {
@@ -3928,6 +4773,7 @@ pub fn title_of(text: &str) -> String {
 /// The note's non-empty lines without markdown marks (rules skipped).
 fn text_lines(text: &str) -> impl Iterator<Item = String> + '_ {
     let clean = |line: &str| -> String {
+        let line = &markdown::strip_marks(line);
         if is_table_separator(line) {
             return String::new();
         }
@@ -3952,6 +4798,27 @@ pub fn ellipsized(fonts: &mut FontSystem, text: &str, size: f32, weight: Weight,
     b.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
     b.set_size(Some(width.max(1.0)), None);
     b.set_text(text, &Attrs::new().family(Family::SansSerif).weight(weight), Shaping::Advanced, None);
+    b.shape_until_scroll(fonts, false);
+    b
+}
+
+/// A formatting toolbar label: `text` in `weight`, and (italic, struck through, monospaced).
+fn format_label(
+    fonts: &mut FontSystem,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    (italic, strike, mono): (bool, bool, bool),
+) -> Buffer {
+    let mut a = Attrs::new().family(if mono { Family::Monospace } else { Family::SansSerif }).weight(weight);
+    if italic {
+        a = a.style(Style::Italic);
+    }
+    if strike {
+        a = a.strikethrough();
+    }
+    let mut b = Buffer::new_empty(Metrics::new(size, size * 1.3));
+    b.set_text(text, &a, Shaping::Advanced, None);
     b.shape_until_scroll(fonts, false);
     b
 }

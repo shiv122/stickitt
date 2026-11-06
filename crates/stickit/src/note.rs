@@ -3,7 +3,7 @@
 use crate::config::{Config, IconPosition, NoteAction, NoteStyle, ReminderSettings};
 use crate::editor::{Doc, EditKind};
 use crate::gfx::{self, Clip};
-use crate::markdown::{self, line_info, Flags};
+use crate::markdown::{self, is_table_separator, line_info, table_cells, table_pipes, Flags};
 use crate::motion::{Feel, Motion};
 use crate::popover::{self, SlashKind, ICON_TABS, SLASH};
 use crate::reminder::{self, Reminder, Repeat};
@@ -37,7 +37,19 @@ const BLINK: Duration = Duration::from_millis(530);
 /// Stop blinking after this much inactivity so an idle note costs zero CPU.
 const BLINK_IDLE: Duration = Duration::from_secs(20);
 const NUDGE_EVERY: Duration = Duration::from_secs(45);
+/// A ringing note also wiggles this long after it starts, before settling into `NUDGE_EVERY`.
+const RING_NUDGES: [Duration; 2] = [Duration::from_secs(4), Duration::from_secs(12)];
+/// One breath of a ringing note's glow, and how often it repaints.
+const PULSE: f32 = 1.6;
+const PULSE_FRAME: Duration = Duration::from_millis(33);
 const FRAME: Duration = Duration::from_millis(16);
+/// Space either side of a table cell's text, and the height the `|---|` row shrinks to.
+const TABLE_PAD: f32 = 10.0;
+const TABLE_RULE: f32 = 1.0;
+/// Table rows are this much taller than a line of text, and columns at least this wide (Notion's
+/// roomy, light grid).
+const TABLE_ROW: f32 = 11.0;
+const TABLE_MIN_COL: f32 = 64.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -152,12 +164,27 @@ enum Deco {
     CodeBlock,
     Quote,
     Rule,
+    /// A `==highlight==`: a soft badge in one of `markdown::HIGHLIGHTS`.
+    Badge(u8),
 }
 
 impl Deco {
     fn is_background(self) -> bool {
         !matches!(self, Deco::Checkbox(_) | Deco::Bullet)
     }
+}
+
+/// A table as painted: each row's (top, height), and the column widths.
+type TableDraw = (Vec<(f32, f32)>, Vec<f32>);
+
+/// A Markdown table shown as a grid. `decorate` finds it; `style_tables` sizes its columns
+/// (or leaves it as plain text while the caret is in it or it is too wide for the note).
+#[derive(Clone, Debug, Default)]
+struct Table {
+    /// Each row's byte range in the display text; `rows[1]` is the `|---|` separator.
+    rows: Vec<std::ops::Range<usize>>,
+    /// Column widths in pixels; empty while the table is shown as plain text.
+    cols: Vec<f32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -199,6 +226,10 @@ enum PopHit {
     RemindIn(i64),
     RemindDay(i64),
     RemindTime(usize),
+    /// The fine-tune row: move the pending time by this many minutes.
+    RemindStep(i64),
+    /// The fine-tune row's time: set the reminder for it.
+    RemindSet,
     RemindRepeat(usize),
     RemindClear,
     /// Window mode.
@@ -288,6 +319,8 @@ pub struct Note {
     dark: bool,
     /// Last time the note had focus (the dock lists recent notes first).
     pub last_active: Instant,
+    /// Last time the note was focused, pointed at or otherwise in use: `[notes.fade]` counts from here.
+    in_use_at: Instant,
 
     /// The text, one buffer line per paragraph. Only lines near the view keep their shaping
     /// and layout (tens of bytes per glyph); the rest are freed and re-shaped when scrolled to.
@@ -311,6 +344,7 @@ pub struct Note {
     page_scroll: Option<f32>,
     goal_x: Option<f32>,
     decos: Vec<(std::ops::Range<usize>, Deco)>,
+    tables: Vec<Table>,
     /// Caret line the current layout was built for (its list syntax is shown raw).
     layout_caret_line: Option<usize>,
 
@@ -347,6 +381,8 @@ pub struct Note {
     wiggle: Option<PhysicalPosition<i32>>,
     shake: Motion,
     last_nudge: Instant,
+    /// When the reminder started ringing (the glow breathes from here).
+    ring_at: Instant,
     /// A checkbox that was just ticked (its line start) and its pop-in scale.
     pop: Option<(usize, Motion)>,
     /// Compact view: one line until clicked (`expanded`), folding back when left.
@@ -368,6 +404,8 @@ pub struct Note {
     remind_query: String,
     remind_day: i64,
     remind_repeat: Repeat,
+    /// The reminder menu's fine-tune time (for the chosen day).
+    remind_time: chrono::NaiveTime,
     /// Transparent room added below the card so a popover taller than the note fits (px).
     extra_h: u32,
     /// The note springing in (0 → 1) when it appears, and out when hidden.
@@ -449,6 +487,7 @@ impl Note {
             hiding: false,
             dark,
             last_active: now,
+            in_use_at: now,
             buffer: Buffer::new_empty(Metrics::new(14.5, 22.0)),
             line_heights: Vec::new(),
             hot: Vec::new(),
@@ -464,6 +503,7 @@ impl Note {
             goal_x: None,
             decos: Vec::new(),
             layout_caret_line: None,
+            tables: Vec::new(),
             focused: false,
             editing: false,
             caret_on: true,
@@ -489,6 +529,7 @@ impl Note {
             wiggle: None,
             shake: Motion::new(0.0, Feel::Shake).with_epsilon(0.05),
             last_nudge: now,
+            ring_at: now,
             pop: None,
             compact: rec.view == 1,
             expanded: false,
@@ -500,6 +541,7 @@ impl Note {
             remind_query: String::new(),
             remind_day: 0,
             remind_repeat: Repeat::Once,
+            remind_time: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default(),
             extra_h: 0,
             resizing: None,
             appear: Motion::new(0.0, Feel::Snappy),
@@ -860,12 +902,20 @@ impl Note {
         for tok in reminder::find_tokens(&text, Local::now()) {
             markdown::mark(&mut flags, tok.range, markdown::REMINDER);
         }
+        let marks: Vec<markdown::Highlight> =
+            markdown::highlights(&text).into_iter().filter(|h| flags[h.open.start] & markdown::CODE == 0).collect();
+        for h in &marks {
+            markdown::mark(&mut flags, h.open.clone(), markdown::MARKER);
+            markdown::mark(&mut flags, h.close.clone(), markdown::MARKER);
+        }
         if let Some(r) = preedit {
             markdown::mark(&mut flags, r, markdown::PREEDIT);
         }
         let caret_line = self.caret_line();
         self.decorate(&text, &mut flags, caret_line);
+        self.decos.extend(marks.into_iter().map(|h| (h.text, Deco::Badge(h.color as u8))));
         self.layout_caret_line = caret_line;
+        let (spacers, thin) = self.style_tables(fonts, &text, &mut flags, width, (&pal, size, line));
         // The shaper drops a trailing empty line; a sentinel space keeps it addressable.
         if text.is_empty() || text.ends_with('\n') {
             text.push(' ');
@@ -891,6 +941,19 @@ impl Note {
                 if *f != 0 && a < b {
                     list.add_span(a - ls..b - ls, &attrs_for(*f, &pal, size, line));
                 }
+            }
+            // Table dividers stretched to line up the columns; separator rows made thin.
+            for &(at, em, first) in spacers.iter().filter(|(at, _, _)| (ls..le).contains(at)) {
+                let mut a = attrs_for(flags[at], &pal, size, line).letter_spacing(em);
+                if first {
+                    // The row's first (hidden) divider makes the whole row taller.
+                    a = a.metrics(Metrics::new(size, line + TABLE_ROW * s));
+                }
+                list.add_span(at - ls..at - ls + 1, &a);
+            }
+            if le > ls && thin.contains(&ls) {
+                let a = attrs_for(markdown::COLLAPSED, &pal, size, line).metrics(Metrics::new(0.05, TABLE_RULE * s));
+                list.add_span(0..le - ls, &a);
             }
             lines.push((ls..le, list));
         }
@@ -1053,11 +1116,39 @@ impl Note {
     fn decorate(&mut self, text: &str, flags: &mut [Flags], caret_line: Option<usize>) {
         use markdown::{mark, CODE, COLLAPSED, HIDDEN, MARKER};
         self.decos.clear();
+        self.tables.clear();
+        // Tables: a header row, a `|---|` separator, then rows. Shown as plain text while the
+        // caret is in one.
+        let all: Vec<&str> = text.split('\n').collect();
+        let mut in_table = vec![false; all.len()];
+        let mut starts = Vec::with_capacity(all.len());
+        let mut at = 0;
+        for line in &all {
+            starts.push(at);
+            at += line.len() + 1;
+        }
+        let mut i = 0;
+        while i + 1 < all.len() {
+            if table_pipes(all[i]).is_some() && is_table_separator(all[i + 1]) {
+                let mut j = i + 2;
+                while j < all.len() && table_pipes(all[j]).is_some() && !is_table_separator(all[j]) {
+                    j += 1;
+                }
+                if !caret_line.is_some_and(|c| (i..j).contains(&c)) {
+                    in_table[i..j].iter_mut().for_each(|t| *t = true);
+                    let rows = (i..j).map(|k| starts[k]..starts[k] + all[k].len()).collect();
+                    self.tables.push(Table { rows, cols: Vec::new() });
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
         let mut ls = 0;
         let mut fence_start: Option<usize> = None;
         for (i, line) in text.split('\n').enumerate() {
             let le = ls + line.len();
-            let pretty = Some(i) != caret_line;
+            let pretty = Some(i) != caret_line && !in_table[i];
             let trimmed = line.trim_start();
             if trimmed.starts_with("```") {
                 if pretty {
@@ -1110,6 +1201,119 @@ impl Note {
         if let Some(start) = fence_start {
             self.decos.push((start..text.len(), Deco::CodeBlock));
         }
+    }
+
+    /// Sizes each table found by `decorate` and styles it as a grid: dividers hidden and
+    /// stretched (returned as `(byte, letter spacing in em, first in its row)`) so cells line up
+    /// in columns, the separator row thin (returned by line start). A table wider than the note
+    /// stays plain text.
+    fn style_tables(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &str,
+        flags: &mut [Flags],
+        width: f32,
+        (pal, size, line): (&Palette, f32, f32),
+    ) -> (Vec<(usize, f32, bool)>, Vec<usize>) {
+        use markdown::{mark, COLLAPSED, HIDDEN, MARKER};
+        let mut spacers = Vec::new();
+        let mut thin = Vec::new();
+        if self.tables.is_empty() {
+            return (spacers, thin);
+        }
+        let s = self.scale() * self.zoom as f32 / 100.0;
+        let pad = TABLE_PAD * s;
+        let measure = |fonts: &mut FontSystem, f: &[Flags], r: std::ops::Range<usize>| -> f32 {
+            if r.is_empty() {
+                return 0.0;
+            }
+            let spans: Vec<(&str, Attrs)> = markdown::runs(&f[r.clone()])
+                .into_iter()
+                .map(|(q, fl)| (&text[r.start + q.start..r.start + q.end], attrs_for(fl, pal, size, line)))
+                .collect();
+            let mut b = Buffer::new_empty(Metrics::new(size, line));
+            b.set_wrap(Wrap::None);
+            b.set_rich_text(spans, &attrs_for(0, pal, size, line), Shaping::Advanced, None);
+            b.shape_until_scroll(fonts, false);
+            label_width(&b)
+        };
+        let pipe_w = {
+            let mut b = Buffer::new_empty(Metrics::new(size, line));
+            b.set_text("|", &attrs_for(0, pal, size, line), Shaping::Advanced, None);
+            b.shape_until_scroll(fonts, false);
+            label_width(&b)
+        };
+        for table in &mut self.tables {
+            let span = table.rows[0].start..table.rows.last().map_or(0, |r| r.end);
+            let mut f = flags[span.clone()].to_vec();
+            let local = |r: &std::ops::Range<usize>| r.start - span.start..r.end - span.start;
+            let mut rows: Vec<(Vec<usize>, Vec<std::ops::Range<usize>>)> = Vec::new();
+            for (k, row) in table.rows.iter().enumerate() {
+                let r = local(row);
+                if k == 1 {
+                    mark(&mut f, r, COLLAPSED);
+                    rows.push((Vec::new(), Vec::new()));
+                    continue;
+                }
+                let line_text = &text[row.clone()];
+                let pipes = table_pipes(line_text).unwrap_or_default();
+                let cells = table_cells(line_text, &pipes);
+                // Everything but the cells' text is syntax: hide the dividers, collapse the rest.
+                for b in &mut f[r.clone()] {
+                    *b |= COLLAPSED;
+                }
+                for c in &cells {
+                    for b in &mut f[r.start + c.start..r.start + c.end] {
+                        *b &= !COLLAPSED;
+                        if *b & MARKER != 0 {
+                            *b |= COLLAPSED;
+                        }
+                    }
+                }
+                for &p in &pipes {
+                    f[r.start + p] = (f[r.start + p] & !COLLAPSED) | HIDDEN;
+                }
+                let cells = cells.into_iter().map(|c| r.start + c.start..r.start + c.end).collect();
+                let pipes = pipes.into_iter().map(|p| r.start + p).collect();
+                rows.push((pipes, cells));
+            }
+            // Cells are relative to the table; `measure` works on the whole text.
+            let mut all = flags.to_vec();
+            all[span.clone()].copy_from_slice(&f);
+            let widths: Vec<Vec<f32>> = rows
+                .iter()
+                .map(|(_, cells)| {
+                    cells.iter().map(|c| measure(fonts, &all, span.start + c.start..span.start + c.end)).collect()
+                })
+                .collect();
+            let n = widths.iter().map(Vec::len).max().unwrap_or(0);
+            let mut cols = vec![TABLE_MIN_COL * s; n];
+            for row in &widths {
+                for (k, w) in row.iter().enumerate() {
+                    cols[k] = cols[k].max(w + 2.0 * pad);
+                }
+            }
+            if n == 0 || cols.iter().sum::<f32>() > width - 2.0 * s {
+                continue;
+            }
+            for ((pipes, cells), ws) in rows.iter().zip(&widths) {
+                for (j, &p) in pipes.iter().enumerate() {
+                    let target = match j {
+                        0 => pad,
+                        j if j < cells.len() => cols[j - 1] - ws[j - 1],
+                        _ => match cells.len() {
+                            0 => cols.iter().sum::<f32>() - pad,
+                            m => cols[m - 1] - pad - ws[m - 1] + cols[m..].iter().sum::<f32>(),
+                        },
+                    };
+                    spacers.push((span.start + p, (target - pipe_w) / size, j == 0));
+                }
+            }
+            thin.push(table.rows[1].start);
+            flags[span].copy_from_slice(&f);
+            table.cols = cols;
+        }
+        (spacers, thin)
     }
 
     /// Caret position in buffer coordinates: (x, line_top, line_height).
@@ -1236,8 +1440,13 @@ impl Note {
         !self.ringing && self.reminder.as_ref().is_some_and(|r| r.due <= now)
     }
 
-    pub fn ring(&mut self) {
+    /// The reminder is due: bring the note up, glowing and wiggling, with a chime if `sound`.
+    pub fn ring(&mut self, sound: bool) {
         self.ringing = true;
+        self.ring_at = Instant::now();
+        if sound {
+            crate::chime::play();
+        }
         self.window.set_visible(true);
         self.window.set_minimized(false);
         self.apply_level();
@@ -1340,6 +1549,10 @@ impl Note {
                         Some(Repeat::Every(_)) | None => Repeat::Once,
                         Some(r) => r,
                     };
+                    self.remind_time = match &self.reminder {
+                        Some(r) => reminder::local(r.due).time(),
+                        None => reminder::suggested_time(now, shared.config.reminders.minute_step),
+                    };
                     self.popover = Some(Popover::Remind);
                 }
                 self.pop_hover = None;
@@ -1404,9 +1617,19 @@ impl Note {
 
         self.chrome.to(if self.hovered || self.ringing { 1.0 } else { 0.0 });
         if !self.closing && !self.hiding {
-            // In slowly and softly; out (below) a little quicker.
-            if self.opacity.target_value() < 1.0 {
-                self.opacity.animate_to(1.0, Feel::Gentle);
+            let target = match self.fade_at(now) {
+                Some(at) if at <= now => self.st.fade.opacity.clamp(0.05, 1.0),
+                Some(at) => {
+                    wake(at);
+                    1.0
+                }
+                None => 1.0,
+            };
+            if (self.opacity.target_value() - target).abs() > 0.001 {
+                // In slowly and softly (also when fading for being idle); back quickly when pointed
+                // at, so a faded note never feels in the way.
+                let back = target > self.opacity.target_value() && self.opacity.value() > 0.04;
+                self.opacity.animate_to(target, if back { Feel::Quick } else { Feel::Gentle });
             }
             if self.appear.target_value() < 1.0 {
                 self.appear.animate_to(1.0, Feel::Gentle);
@@ -1446,12 +1669,21 @@ impl Note {
             }
         }
         if self.ringing {
-            if now - self.last_nudge >= NUDGE_EVERY {
+            // Wiggle when it starts, again a few seconds later, then now and then.
+            let due = RING_NUDGES
+                .iter()
+                .map(|&d| self.ring_at + d)
+                .find(|&t| t > self.last_nudge)
+                .unwrap_or(self.last_nudge + NUDGE_EVERY);
+            if now >= due {
                 self.start_wiggle();
                 wake(now + FRAME);
             } else {
-                wake(self.last_nudge + NUDGE_EVERY);
+                wake(due);
             }
+            // The glow breathes.
+            self.needs_paint = true;
+            wake(now + PULSE_FRAME);
         }
 
         let blinking = self.focused && self.doc.selection().is_none() && now - self.last_input < BLINK_IDLE;
@@ -1774,6 +2006,10 @@ impl Note {
                 self.doc.wrap("~~");
                 text = true;
             }
+            NoteAction::Highlight => {
+                self.doc.wrap("==");
+                text = true;
+            }
             NoteAction::AddReminder => return self.act(Action::Remind, shared),
             NoteAction::ZoomIn => self.set_zoom(self.zoom + 10),
             NoteAction::ZoomOut => self.set_zoom(self.zoom.saturating_sub(10)),
@@ -1978,6 +2214,13 @@ impl Note {
                 self.doc.replace(c..c, &format!("{lead}```\n\n```"), EditKind::Other);
                 self.doc.cursor = c + lead.len() + 4;
             }
+            SlashKind::Table => {
+                self.doc.set_line_prefix("");
+                let c = self.doc.cursor;
+                let lead = if c == 0 || self.doc.text[..c].ends_with('\n') { "" } else { "\n" };
+                self.doc.replace(c..c, &format!("{lead}| Column | Column |\n| --- | --- |\n|  |  |"), EditKind::Other);
+                self.doc.cursor = c + lead.len() + 2;
+            }
             SlashKind::Divider => {
                 self.doc.set_line_prefix("");
                 let c = self.doc.cursor;
@@ -2024,8 +2267,18 @@ impl Note {
                 self.needs_paint = true;
                 return None;
             }
+            PopHit::RemindStep(minutes) => {
+                self.remind_time = reminder::nudge(self.remind_time, minutes);
+                self.needs_paint = true;
+                return None;
+            }
+            PopHit::RemindSet => {
+                let due = reminder::at_day(Local::now(), self.remind_day, self.remind_time)?;
+                self.set_reminder(Reminder::once(due).repeating(self.remind_repeat));
+            }
             PopHit::RemindTime(i) => {
                 let time = *shared.config.reminders.times.get(i)?;
+                self.remind_time = time;
                 let due = reminder::at_day(Local::now(), self.remind_day, time)?;
                 self.set_reminder(Reminder::once(due).repeating(self.remind_repeat));
             }
@@ -2356,7 +2609,44 @@ impl Note {
                     })
                     .collect();
                 chips(fonts, &mut d, cy, 28.0 * s, 4.0 * s, times);
-                cy += 38.0 * s;
+                cy += 32.0 * s;
+
+                // Fine-tune: [-1h] [-5m] [ 9:45 AM ✓ ] [+5m] [+1h]. The middle sets it.
+                let step = rs.minute_step.clamp(1, 60) as i64;
+                let (bw, gap, bh) = (38.0 * s, 4.0 * s, 28.0 * s);
+                let mid = inner - 4.0 * bw - 4.0 * gap;
+                let mut bx = x + pad;
+                for (i, minutes) in [-60, -step, 0, step, 60].into_iter().enumerate() {
+                    let width = if i == 2 { mid } else { bw };
+                    let r = (bx, cy, width, bh);
+                    bx += width + gap;
+                    if i == 2 {
+                        let open = reminder::at_day(now, self.remind_day, self.remind_time).is_some();
+                        let text = format!("{}  ✓", reminder::clock_label(self.remind_time));
+                        let b = small_label(fonts, &text, 12.5 * s, Weight::SEMIBOLD);
+                        let at = (r.0 + (r.2 - label_width(&b)) / 2.0, r.1 + (r.3 - label_h(&b)) / 2.0);
+                        if open {
+                            d.selected.push(r);
+                            d.labels.push((b, pal.accent.text(255), at));
+                            d.cells.push((r, PopHit::RemindSet));
+                        } else {
+                            // Already past on the chosen day.
+                            d.tiles.push(r);
+                            d.labels.push((b, pal.secondary.text(150), at));
+                        }
+                        continue;
+                    }
+                    let text = match minutes.abs() {
+                        60 => format!("{}1h", if minutes < 0 { "−" } else { "+" }),
+                        m => format!("{}{m}m", if minutes < 0 { "−" } else { "+" }),
+                    };
+                    let b = small_label(fonts, &text, 11.5 * s, Weight::MEDIUM);
+                    let at = (r.0 + (r.2 - label_width(&b)) / 2.0, r.1 + (r.3 - label_h(&b)) / 2.0);
+                    d.tiles.push(r);
+                    d.labels.push((b, pal.text.text(230), at));
+                    d.cells.push((r, PopHit::RemindStep(minutes)));
+                }
+                cy += bh + 10.0 * s;
 
                 caption(fonts, &mut d, cy, "REPEAT");
                 cy += 16.0 * s;
@@ -2917,7 +3207,8 @@ impl Note {
 
     /// Temporarily floats the note above everything while it's hovered in the dock.
     /// Sets the note up for a `--shots` picture: light or dark, hovered (showing its controls),
-    /// and with one of its menus open: "more", "remind", "colors" or "window".
+    /// and with one of its menus open: "more", "remind", "colors" or "window" (or "ring": its
+    /// reminder ringing, the glow at its brightest).
     pub fn stage(&mut self, dark: bool, hovered: bool, menu: Option<&str>, shared: &mut Shared) {
         if self.dark != dark {
             // Text colours are part of the layout.
@@ -2926,6 +3217,10 @@ impl Note {
         }
         self.hovered = hovered;
         self.popover = None;
+        self.ringing = menu == Some("ring");
+        if self.ringing {
+            self.ring_at = Instant::now() - Duration::from_secs_f32(PULSE / 2.0);
+        }
         let action = match menu {
             Some("more") => Some(Action::More),
             Some("remind") => Some(Action::Remind),
@@ -2947,6 +3242,29 @@ impl Note {
         }
         self.pop = None;
         self.needs_paint = true;
+    }
+
+    /// When this note fades for being idle (`[notes.fade]`), or None if it doesn't. Being in use
+    /// (focused, pointed at, a menu open, ringing, shown from the dock) restarts the count.
+    fn fade_at(&mut self, now: Instant) -> Option<Instant> {
+        use crate::config::FadeWhich;
+        let f = &self.st.fade;
+        let applies =
+            f.enabled && (f.which == FadeWhich::All || self.mode == Mode::OnTop) && (f.compact || !self.collapsed());
+        if !applies {
+            return None;
+        }
+        let busy = self.focused
+            || self.hovered
+            || self.ringing
+            || self.peeking
+            || self.popover.is_some()
+            || self.moving.is_some()
+            || self.resizing.is_some();
+        if busy {
+            self.in_use_at = now;
+        }
+        Some(self.in_use_at + Duration::from_secs_f32(f.after.max(1.0)))
     }
 
     pub fn peek(&mut self, on: bool) {
@@ -3167,6 +3485,16 @@ impl Note {
             let y = cy + self.scroll / (self.content_h - ch) * (ch - thumb);
             (kx + kw - 7.0 * s, y, 3.0 * s, thumb)
         });
+        // Tables: each row's top and height, and the column widths.
+        let tables: Vec<TableDraw> = self
+            .tables
+            .iter()
+            .filter(|t| !t.cols.is_empty())
+            .map(|t| {
+                let rows = t.rows.iter().filter_map(|r| self.caret_geom(r.start).map(|(_, top, h)| (top, h))).collect();
+                (rows, t.cols.clone())
+            })
+            .collect();
         let mut decos: Vec<(gfx::Rect, Deco, f32)> = Vec::new();
         for (r, d) in &self.decos {
             let rects = self.span_rects(self.cursor_at(r.start), self.cursor_at(r.end));
@@ -3174,7 +3502,7 @@ impl Note {
                 Some((ls, m)) if self.doc.line_bounds(self.to_doc(r.start)).0 == *ls => m.value(),
                 _ => 1.0,
             };
-            if *d == Deco::CodePill {
+            if matches!(d, Deco::CodePill | Deco::Badge(_)) {
                 decos.extend(rects.iter().map(|&q| (q, *d, 1.0)));
             } else if let Some(first) = rects.first() {
                 // Union across wrapped runs.
@@ -3209,6 +3537,13 @@ impl Note {
         let appear = from + (1.0 - from) * self.appear.value().clamp(0.0, 1.0);
         let resizing = self.resizing.is_some();
         let (hover, scroll, ringing) = (self.hover, self.scroll, self.ringing);
+        // 0 → 1 → 0 once per breath while ringing.
+        let pulse = if ringing {
+            let t = self.ring_at.elapsed().as_secs_f32() / PULSE;
+            0.5 - 0.5 * (t * std::f32::consts::TAU).cos()
+        } else {
+            0.0
+        };
         let chrome = self.chrome.value().clamp(0.0, 1.0);
         let opacity = (self.opacity.value().clamp(0.0, 1.0) * 255.0) as u8;
         let fade = |item: &BarItem, alpha: u8| if item.fade { (alpha as f32 * chrome) as u8 } else { alpha };
@@ -3231,6 +3566,17 @@ impl Note {
             }
             {
                 let Some(mut pm) = PixmapMut::from_bytes(data, width, height) else { return };
+                if ringing {
+                    // A soft halo in the alert colour, breathing.
+                    for i in 0..5 {
+                        let g = (i as f32 + 1.0) * 2.0 * s;
+                        let r = self.st.radius * s + g;
+                        if let Some(p) = gfx::squircle(kx - g, ky - g, kw + 2.0 * g, kh + 2.0 * g, r) {
+                            let a = (70.0 - i as f32 * 13.0) * (0.3 + 0.7 * pulse);
+                            gfx::stroke_path(&mut pm, &p, 2.2 * s, pal.alert, a.max(0.0) as u8);
+                        }
+                    }
+                }
                 if let Some(card) = gfx::squircle(kx, ky, kw, kh, self.st.radius * s) {
                     gfx::fill_path(&mut pm, &card, pal.base, 255);
                     // A soft "cover" in the note's colour, fading into the page.
@@ -3240,7 +3586,10 @@ impl Note {
                     let (edge, edge_alpha) = if pal.dark { (theme::WHITE, 26) } else { (pal.text, 22) };
                     gfx::stroke_path(&mut pm, &card, 1.0 * s, edge, edge_alpha);
                     if ringing {
-                        gfx::stroke_path(&mut pm, &card, 2.5 * s, pal.alert, 255);
+                        // The top of the note warms to the alert colour with each breath.
+                        let warm = (36.0 + 54.0 * pulse) as u8;
+                        gfx::fill_path_gradient(&mut pm, &card, pal.alert, (ky, warm), (ky + cover, 0));
+                        gfx::stroke_path(&mut pm, &card, 2.0 * s, pal.alert, (165.0 + 90.0 * pulse) as u8);
                     }
                     if resizing {
                         // A dotted outline: "you're resizing this".
@@ -3266,6 +3615,14 @@ impl Note {
                         Deco::Quote => {
                             (gfx::rounded_rect(cx + x, y + 3.0 * s, 3.0 * s, lh - 6.0 * s, 1.5 * s), pal.text, 230)
                         }
+                        Deco::Badge(c) => {
+                            // Notion's background colours: the matching note tints' washes.
+                            const TINT: [u16; 9] = [0, 5, 8, 6, 3, 2, 4, 1, 7];
+                            let (_, wash) = theme::tint(TINT[c as usize % TINT.len()], pal.dark);
+                            let ph = (font_px * 1.4).min(lh);
+                            let p = gfx::rounded_rect(cx + x - 3.0 * s, y + (lh - ph) / 2.0, rw + 6.0 * s, ph, 5.0 * s);
+                            (p, wash, 255)
+                        }
                         Deco::Rule => {
                             (gfx::rounded_rect(cx, y + lh / 2.0 - 0.5 * s, cw, s.max(1.0), 0.5 * s), pal.secondary, 90)
                         }
@@ -3273,6 +3630,36 @@ impl Note {
                     };
                     if let Some(p) = path {
                         gfx::fill_path(&mut pm, &p, color, alpha);
+                    }
+                }
+                for (rows, cols) in &tables {
+                    let (Some(&(top, hh)), Some(&(last, lh))) = (rows.first(), rows.last()) else { continue };
+                    if rows.len() < 2 {
+                        continue;
+                    }
+                    let (y0, y1) = (cy + top - scroll, cy + last + lh - scroll);
+                    if y1 < ky + self.st.top_bar * s || y0 > ky + kh {
+                        continue;
+                    }
+                    let w: f32 = cols.iter().sum();
+                    let hair = s.max(1.0);
+                    let (ink, line_a, head_a) = if pal.dark { (theme::WHITE, 26, 10) } else { (pal.text, 26, 9) };
+                    // The header row's soft background, down to the separator.
+                    let head = hh + rows[1].1;
+                    gfx::fill_rect(&mut pm, cx, y0, w, head, ink, head_a);
+                    // Horizontal hairlines: the top, under the header, between rows, the bottom.
+                    gfx::fill_rect(&mut pm, cx, y0, w, hair, ink, line_a);
+                    gfx::fill_rect(&mut pm, cx, y0 + head - hair, w, hair, ink, line_a);
+                    for &(t, _) in rows.iter().skip(3) {
+                        gfx::fill_rect(&mut pm, cx, cy + t - scroll, w, hair, ink, line_a);
+                    }
+                    gfx::fill_rect(&mut pm, cx, y1 - hair, w, hair, ink, line_a);
+                    // Vertical hairlines: the edges and between columns.
+                    let mut x = cx;
+                    gfx::fill_rect(&mut pm, x, y0, hair, y1 - y0, ink, line_a);
+                    for c in cols {
+                        x += c;
+                        gfx::fill_rect(&mut pm, x - hair, y0, hair, y1 - y0, ink, line_a);
                     }
                 }
                 for &(x, y, rw, rh) in &sel_rects {
@@ -3541,6 +3928,14 @@ pub fn title_of(text: &str) -> String {
 /// The note's non-empty lines without markdown marks (rules skipped).
 fn text_lines(text: &str) -> impl Iterator<Item = String> + '_ {
     let clean = |line: &str| -> String {
+        if is_table_separator(line) {
+            return String::new();
+        }
+        if let Some(pipes) = table_pipes(line) {
+            let cells: Vec<&str> =
+                table_cells(line, &pipes).into_iter().map(|r| &line[r]).filter(|c| !c.is_empty()).collect();
+            return cells.join(" · ").chars().filter(|c| !matches!(c, '*' | '`' | '~')).collect();
+        }
         let info = line_info(line);
         let body = if info.is_list() { &line[info.content_start(line)..] } else { line };
         let body: String =

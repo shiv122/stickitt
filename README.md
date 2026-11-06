@@ -254,6 +254,7 @@ width         = 220
 
 | Key | Default | |
 |---|---|---|
+| `theme` | `auto` | `auto` follows the system's light or dark mode; `light` or `dark` picks one |
 | `tray_icon` | `true` | Icon in the notification area (menu bar) with a quick menu |
 | `confirm_delete` | `true` | "Delete note" asks for a second click |
 | `trash_days` | `30` | Days a deleted note stays in the trash |

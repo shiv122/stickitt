@@ -1,6 +1,35 @@
 //! Colours, after Notion's palette: a neutral page, and per-note colours that are muted
 //! rather than neon. A note's colour tints its "cover" (the top of the card), its icon tile
-//! in the dock and its accents; light/dark follows the system appearance.
+//! in the dock and its accents; light/dark follows the system appearance unless the settings
+//! choose one.
+
+use std::sync::atomic::{AtomicU8, Ordering};
+use winit::window::Theme;
+
+/// Light or dark: following the system, or chosen in the settings (`[general] theme`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+static APPEARANCE: AtomicU8 = AtomicU8::new(Appearance::Auto as u8);
+
+/// Applies the settings' choice to every window drawn from now on.
+pub fn set_appearance(a: Appearance) {
+    APPEARANCE.store(a as u8, Ordering::Relaxed);
+}
+
+/// Whether to draw dark, given the system's theme for the window.
+pub fn is_dark(system: Option<Theme>) -> bool {
+    match APPEARANCE.load(Ordering::Relaxed) {
+        x if x == Appearance::Light as u8 => false,
+        x if x == Appearance::Dark as u8 => true,
+        _ => system == Some(Theme::Dark),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);

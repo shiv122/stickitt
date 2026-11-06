@@ -236,11 +236,19 @@ pub struct GeneralSettings {
     pub trash_days: f32,
     /// Seconds the "Note deleted · Undo" toast stays up.
     pub undo_seconds: f32,
+    /// Light or dark mode, or following the system.
+    pub theme: crate::theme::Appearance,
 }
 
 impl Default for GeneralSettings {
     fn default() -> Self {
-        Self { tray_icon: true, confirm_delete: true, trash_days: 30.0, undo_seconds: 6.0 }
+        Self {
+            tray_icon: true,
+            confirm_delete: true,
+            trash_days: 30.0,
+            undo_seconds: 6.0,
+            theme: crate::theme::Appearance::Auto,
+        }
     }
 }
 
@@ -605,6 +613,29 @@ const SETTINGS: &[Setting] = &[
         "length of the edge strip that opens the dock"
     ),
     // [general]
+    Setting {
+        section: "general",
+        key: "theme",
+        doc: "auto (follows the system), light or dark",
+        get: |c| {
+            use crate::theme::Appearance;
+            match c.general.theme {
+                Appearance::Auto => "auto",
+                Appearance::Light => "light",
+                Appearance::Dark => "dark",
+            }
+            .into()
+        },
+        set: |c, v| {
+            use crate::theme::Appearance;
+            match v.to_ascii_lowercase().as_str() {
+                "auto" | "system" => c.general.theme = Appearance::Auto,
+                "light" => c.general.theme = Appearance::Light,
+                "dark" => c.general.theme = Appearance::Dark,
+                _ => {}
+            }
+        },
+    },
     Setting {
         section: "general",
         key: "tray_icon",
@@ -991,5 +1022,14 @@ mod tests {
         assert_eq!(cfg.notes.compact.height, 80.0);
         assert_eq!(cfg.general.undo_seconds, 2.0);
         assert!(!cfg.general.tray_icon);
+    }
+
+    #[test]
+    fn theme_is_auto_light_or_dark() {
+        use crate::theme::Appearance;
+        assert_eq!(Config::parse("").general.theme, Appearance::Auto);
+        assert_eq!(Config::parse("[general]\ntheme = Light\n").general.theme, Appearance::Light);
+        assert_eq!(Config::parse("[general]\ntheme = dark\n").general.theme, Appearance::Dark);
+        assert_eq!(Config::parse("[general]\ntheme = purple\n").general.theme, Appearance::Auto);
     }
 }

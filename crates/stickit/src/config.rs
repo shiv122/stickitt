@@ -244,11 +244,12 @@ impl Default for GeneralSettings {
     }
 }
 
-/// How notes and the dock relate to Windows virtual desktops.
+/// How notes and the dock relate to virtual desktops (Windows) and Spaces (macOS).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DesktopSettings {
-    /// Each note stays on the virtual desktop it was made on. Windows only does this for
-    /// windows with a taskbar entry, so notes then share one grouped taskbar button.
+    /// Each note stays on the virtual desktop it was made on; off, notes show on all of them.
+    /// Windows only does this for windows with a taskbar entry, so notes then share one grouped
+    /// taskbar button.
     pub per_desktop: bool,
     /// The dock also lists notes from other desktops (in their own group).
     pub dock_shows_others: bool,
@@ -377,7 +378,7 @@ const SECTIONS: &[(&str, &str)] = &[
         "reminders",
         "The reminder menu (clock button or Ctrl+R in a note). You can also type @3pm, @fri 9am, @daily 8am in a note.",
     ),
-    ("desktops", "Windows virtual desktops."),
+    ("desktops", "Virtual desktops (Windows) and Spaces (macOS)."),
 ];
 
 fn num(value: &str, lo: f32, hi: f32) -> Option<f32> {
@@ -654,7 +655,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         section: "desktops",
         key: "per_desktop",
-        doc: "notes stay on their own virtual desktop (they then share one taskbar button)",
+        doc: "notes stay on their own desktop; off, they show on all (Windows: one taskbar button)",
         get: |c| c.desktops.per_desktop.to_string(),
         set: |c, v| c.desktops.per_desktop = flag(v).unwrap_or(c.desktops.per_desktop),
     },

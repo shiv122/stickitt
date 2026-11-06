@@ -324,6 +324,8 @@ impl Dock {
             attrs.with_skip_taskbar(true)
         };
         let window = Rc::new(el.create_window(attrs)?);
+        // The edge tab is there on every desktop (macOS Spaces, full-screen apps included).
+        crate::desktops::show_on_all(&window, true);
         let surface = Surface::new(ctx, &window, true)?;
         let dark = window.theme() == Some(Theme::Dark);
         let mut dock = Dock {

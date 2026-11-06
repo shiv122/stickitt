@@ -33,7 +33,9 @@ no web view, so the app starts instantly, idles at 0% CPU and uses a few megabyt
 - **Window modes**: normal, always on top, or on the desktop behind your windows.
 - **Compact view**: shrink a note to a single line with its icon and title.
 - **Trash with undo**, hide and restore, and a tray icon to get everything back.
-- **Virtual desktops** (Windows): each note stays on the desktop it was made on.
+- **Virtual desktops** (Windows) and **Spaces** (macOS): each note stays on the desktop it was
+  made on, and the dock's edge tab is on every desktop. Picking a note from another desktop in
+  the dock brings it to the one you are on.
 - **Configurable**: sizes, colours, the dock and every shortcut live in one commented settings
   file that applies as you save.
 
@@ -187,8 +189,8 @@ hidden one), and typing searches. **New note** at the bottom adds a note to the 
 **Right-click the dock** for everything else:
 
 - **Profiles**: sets of lists you switch between, such as Work and Home
-  (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> for the next one). On Windows each virtual desktop
-  can remember its own profile.
+  (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd> for the next one). Each virtual desktop (Windows)
+  or Space (macOS) can remember its own profile.
 - **Lists**: tick the lists the current profile shows, add new ones, or remove one with its ×.
   Move a note between lists from its ⋯ menu.
 - **View**: compact list, detailed list or icons.
@@ -330,8 +332,8 @@ Violet, Rose, Amber, Lime, Mint, Slate, Cobalt, Grape, Aqua, Lavender.
 |---|---|---|
 | `[reminders]` `times` | `9am, 12pm, 3pm, 6pm, 9pm` | Times offered in the reminder menu (up to 6) |
 | `soon` | `20m, 1h, 3h` | The "in …" choices (up to 4) |
-| `[desktops]` `per_desktop` | `true` | Notes stay on their own virtual desktop (Windows) |
-| `dock_shows_other_desktops` | `false` | The dock also lists notes from other desktops |
+| `[desktops]` `per_desktop` | `true` | Notes stay on their own desktop or Space; `false` shows them on all |
+| `dock_shows_other_desktops` | `false` | The dock also lists notes from other desktops; pick one to bring it here |
 | `profile_per_desktop` | `true` | Each desktop remembers its own profile |
 
 </details>

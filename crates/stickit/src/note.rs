@@ -418,6 +418,8 @@ impl Note {
 
         let window = Rc::new(el.create_window(attrs)?);
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        crate::desktops::show_on_all(&window, !shared.config.desktops.per_desktop);
         let surface = Surface::new(ctx, &window, false)?;
         let dark = window.theme() == Some(Theme::Dark);
         let now = Instant::now();
@@ -1259,15 +1261,15 @@ impl Note {
         self.surface.pin_to_bottom(!raised && self.mode == Mode::Desktop);
     }
 
-    /// Shows or hides the note's taskbar entry (needed for per-desktop notes on Windows).
-    pub fn set_taskbar(&self, on: bool) {
+    /// Keeps the note on its own virtual desktop (`per_desktop`), or shows it on all of them.
+    /// Windows ties this to the taskbar entry; macOS to the window's Spaces behaviour.
+    pub fn set_taskbar(&self, per_desktop: bool) {
         #[cfg(windows)]
         {
             use winit::platform::windows::WindowExtWindows;
-            self.window.set_skip_taskbar(!on);
+            self.window.set_skip_taskbar(!per_desktop);
         }
-        #[cfg(not(windows))]
-        let _ = on;
+        crate::desktops::show_on_all(&self.window, !per_desktop);
     }
 
     fn stop_ringing(&mut self) {

@@ -1,6 +1,8 @@
-//! Which virtual desktop a window lives on (Windows 10+), through the documented
-//! `IVirtualDesktopManager` COM interface. Desktops are identified by GUID strings so they can
-//! be stored. Elsewhere every call is a no-op.
+//! Which virtual desktop a window lives on. Windows 10+: the documented
+//! `IVirtualDesktopManager` COM interface, desktops identified by GUID strings. macOS: Spaces,
+//! identified by their space id; whether a window is on the current Space is public API, which
+//! Space it is on and moving it are CoreGraphics calls looked up at runtime (when a macOS
+//! release drops them, notes simply stay where they are). Elsewhere every call is a no-op.
 
 use winit::window::Window;
 
@@ -31,6 +33,15 @@ impl Desktops {
     pub fn of_foreground(&self) -> Option<String> {
         self.inner.of_foreground()
     }
+}
+
+/// Shows `window` on every desktop (macOS: every Space, full-screen apps included), or only on
+/// its own. Windows does this through the taskbar entry instead (see `Note::set_taskbar`).
+pub fn show_on_all(window: &Window, on: bool) {
+    #[cfg(target_os = "macos")]
+    imp::show_on_all(window, on);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, on);
 }
 
 #[cfg(windows)]
@@ -142,7 +153,154 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use std::ffi::{c_char, c_void, CStr};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::window::Window;
+
+    type MainConnection = unsafe extern "C" fn() -> i32;
+    type ActiveSpace = unsafe extern "C" fn(i32) -> u64;
+    type SpacesForWindows = unsafe extern "C" fn(i32, i32, *const AnyObject) -> *mut AnyObject;
+    type AddRemove = unsafe extern "C" fn(i32, *const AnyObject, *const AnyObject);
+
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+    /// `NSWindowCollectionBehavior`: on every Space, kept still by Mission Control, allowed over
+    /// full-screen apps, left out of window cycling.
+    const ALL_SPACES: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+    /// `kCGSAllSpacesMask`: every kind of Space a window can be on.
+    const ALL_SPACE_KINDS: i32 = 7;
+
+    struct Fns {
+        conn: i32,
+        active: ActiveSpace,
+        spaces_for: SpacesForWindows,
+        add: Option<AddRemove>,
+        remove: Option<AddRemove>,
+    }
+
+    pub struct Manager(Option<Fns>);
+
+    /// The `NSWindow` behind a winit window.
+    pub fn hwnd(window: &Window) -> Option<Retained<AnyObject>> {
+        let RawWindowHandle::AppKit(h) = window.window_handle().ok()?.as_raw() else { return None };
+        // SAFETY: winit's handle holds a valid NSView; the event loop runs on the main thread.
+        let view: &AnyObject = unsafe { h.ns_view.cast().as_ref() };
+        unsafe { msg_send![view, window] }
+    }
+
+    pub fn show_on_all(window: &Window, on: bool) {
+        let Some(w) = hwnd(window) else { return };
+        unsafe {
+            let behavior: usize = msg_send![&*w, collectionBehavior];
+            let behavior = if on { behavior | ALL_SPACES } else { behavior & !ALL_SPACES };
+            let _: () = msg_send![&*w, setCollectionBehavior: behavior];
+        }
+    }
+
+    unsafe fn lookup<T: Copy>(name: &CStr) -> Option<T> {
+        let p = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+        // SAFETY: T is the function pointer type of `name`.
+        (!p.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) })
+    }
+
+    /// An `NSArray` of one number (toll-free bridged to the `CFArray` CoreGraphics takes).
+    fn one(n: u64) -> Option<Retained<AnyObject>> {
+        unsafe {
+            let n: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithUnsignedLongLong: n];
+            msg_send![class!(NSArray), arrayWithObject: &*n]
+        }
+    }
+
+    impl Manager {
+        pub fn new() -> Self {
+            // SAFETY: the signatures match CoreGraphics' (SkyLight's) declarations.
+            let fns = unsafe {
+                let conn: Option<MainConnection> = lookup(c"CGSMainConnectionID");
+                match (conn, lookup(c"CGSGetActiveSpace"), lookup(c"CGSCopySpacesForWindows")) {
+                    (Some(conn), Some(active), Some(spaces_for)) => Some(Fns {
+                        conn: conn(),
+                        active,
+                        spaces_for,
+                        add: lookup(c"CGSAddWindowsToSpaces"),
+                        remove: lookup(c"CGSRemoveWindowsFromSpaces"),
+                    }),
+                    _ => None,
+                }
+            };
+            Self(fns)
+        }
+
+        /// The Spaces `w` is on.
+        fn spaces(&self, w: &AnyObject) -> Vec<u64> {
+            let Some(f) = &self.0 else { return Vec::new() };
+            let number: isize = unsafe { msg_send![w, windowNumber] };
+            let Some(ids) = one(number as u64) else { return Vec::new() };
+            // SAFETY: returns a +1 CFArray of CFNumbers (or null), owned here.
+            let list = unsafe { (f.spaces_for)(f.conn, ALL_SPACE_KINDS, &*ids) };
+            let Some(list) = (unsafe { Retained::from_raw(list) }) else { return Vec::new() };
+            let count: usize = unsafe { msg_send![&*list, count] };
+            (0..count)
+                .map(|i| unsafe {
+                    let n: *mut AnyObject = msg_send![&*list, objectAtIndex: i];
+                    msg_send![n, unsignedLongLongValue]
+                })
+                .collect()
+        }
+
+        pub fn of(&self, w: Retained<AnyObject>) -> Option<String> {
+            // A window on every Space (or none yet) is on no one desktop.
+            match self.spaces(&w)[..] {
+                [one] => Some(one.to_string()),
+                _ => None,
+            }
+        }
+
+        pub fn is_current(&self, w: Retained<AnyObject>) -> Option<bool> {
+            // A hidden window is on no Space as far as macOS is concerned.
+            let visible: Bool = unsafe { msg_send![&*w, isVisible] };
+            visible.as_bool().then(|| {
+                let here: Bool = unsafe { msg_send![&*w, isOnActiveSpace] };
+                here.as_bool()
+            })
+        }
+
+        pub fn move_to(&self, w: Retained<AnyObject>, desktop: &str) -> bool {
+            let (Some(f), Ok(to)) = (&self.0, desktop.parse::<u64>()) else { return false };
+            let (Some(add), Some(remove)) = (f.add, f.remove) else { return false };
+            let from = self.spaces(&w);
+            if from == [to] {
+                return true;
+            }
+            let number: isize = unsafe { msg_send![&*w, windowNumber] };
+            let (Some(ids), Some(target)) = (one(number as u64), one(to)) else { return false };
+            unsafe {
+                add(f.conn, &*ids, &*target);
+                for space in from.into_iter().filter(|&s| s != to) {
+                    if let Some(old) = one(space) {
+                        remove(f.conn, &*ids, &*old);
+                    }
+                }
+            }
+            true
+        }
+
+        pub fn of_foreground(&self) -> Option<String> {
+            let f = self.0.as_ref()?;
+            let space = unsafe { (f.active)(f.conn) };
+            (space != 0).then(|| space.to_string())
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use winit::window::Window;
 

@@ -8,8 +8,8 @@
 [![Release](https://img.shields.io/github/v/release/shiv122/stickitt)](https://github.com/shiv122/stickitt/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Tiny, native sticky notes for macOS and Windows. Notes are native windows drawn in Rust, with
-no web view, so the app starts instantly, idles at 0% CPU and uses a few megabytes of memory.
+Tiny, native sticky notes for Linux, macOS and Windows. Notes are native windows drawn in Rust,
+with no web view. The event loop sleeps when idle.
 
 https://github.com/user-attachments/assets/bf5d8cbe-f5dd-40eb-b00d-9b7fa28c3267
 
@@ -33,6 +33,39 @@ https://github.com/user-attachments/assets/bf5d8cbe-f5dd-40eb-b00d-9b7fa28c3267
   file that applies as you save.
 
 ## Install
+
+**Linux** (X11, or a Wayland desktop with XWayland): build and package locally using the
+instructions below. Extract `Stick-itt-<version>-linux-<arch>.tar.gz`, then run
+`python3 install.py` inside it. This installs into `~/.local` and adds a desktop-menu entry;
+`./stickit` also runs directly from the extracted folder. Installation does not enable autostart.
+
+The note windows use X11/XWayland because the current window model needs absolute placement,
+hiding and stacking. **This is not a pure Wayland client.** On Wayland, global shortcuts go
+through the desktop's GlobalShortcuts portal, which may ask you to approve them. The desktop's
+choice takes precedence over suggested INI bindings. If the portal is missing, X11 shortcuts
+are attempted with an explicit warning; a desktop can limit their reach outside X11 apps.
+The clipboard prefers native Wayland data-control when supported, otherwise X11/XWayland.
+Per-desktop notes, moving notes between desktops and the dock on every desktop use EWMH.
+On KDE/Wayland a temporary KWin script supplies the real workspace IDs (current KWin no
+longer exposes them through XWayland). It handles only windows with this application's PID
+and class, uses change signals rather than polling, and unloads when Stick-itt quits.
+The notification area needs an AppIndicator/StatusNotifier host; the dock remains available
+on desktops without one. Linux reminder sounds use the desktop theme through
+`canberra-gtk-play`, with a bundled chime as fallback through `pw-play`, `paplay` or `aplay`.
+
+For development on **Arch/CachyOS**:
+
+```sh
+sudo pacman -S --needed base-devel pkgconf gtk3 libayatana-appindicator libxkbcommon libx11 xorg-xwayland libcanberra
+# On KDE/Wayland, also use xdg-desktop-portal and xdg-desktop-portal-kde.
+cargo run --release
+```
+
+On **Debian/Ubuntu**, the build dependencies are `build-essential pkg-config libgtk-3-dev
+libayatana-appindicator3-dev libx11-dev libxkbcommon-dev`; use `xwayland`, your desktop's portal
+backend and `libcanberra-gtk3-module`/`libcanberra-gtk3-0` for desktop integration. A local
+binary requires compatible glibc/system libraries: build on the oldest distribution you intend
+to support. A package built on a rolling distribution is not a universal Linux binary.
 
 **macOS** (11 Big Sur or later, Apple Silicon and Intel), with [Homebrew](https://brew.sh):
 
@@ -257,6 +290,7 @@ Everything is in `stickit.ini`, created on first launch next to your notes:
 |---|---|
 | Windows | `%APPDATA%\Stick-itt\` |
 | macOS | `~/Library/Application Support/Stick-itt/` |
+| Linux | `$XDG_DATA_HOME/Stick-itt/` (default `~/.local/share/Stick-itt/`) |
 
 Open it with **Settings…** in the dock or tray menu, or
 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>,</kbd>. Every option is listed with a comment, and saved
@@ -409,7 +443,7 @@ In a note: `new_note`, `close_note`, `delete_note`, `quit`, `cycle_mode`, `pick_
 
 ## Building from source
 
-Requires [Rust](https://rustup.rs) 1.85 or later.
+Requires [Rust](https://rustup.rs) 1.89 or later (also required by the existing text/SQLite dependencies).
 
 ```sh
 cargo run --release          # build and start
@@ -422,11 +456,29 @@ Packages, as built by the release workflow:
 ```sh
 bash scripts/package-macos.sh       # dist/Stick-itt-<version>-macos.dmg and .zip (universal)
 pwsh scripts/package-windows.ps1    # dist/Stick-itt-<version>-windows-setup.exe and -portable.exe
+bash scripts/package-linux.sh       # dist/Stick-itt-<version>-linux-<arch>.tar.gz and checksum
 ```
 
 The Windows installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). To test the
 packaging without publishing, run the **Release** workflow by hand from the Actions tab: it
 builds everything and keeps the files as workflow artifacts.
+
+Linux unit tests, Clippy, packaging and desktop checks run on a standard GitHub-hosted
+Ubuntu 26.04 runner. The workflow installs the build and desktop-test dependencies automatically.
+The integration and installer regression scripts below can also be run locally.
+
+`python3 scripts/test-linux.py` starts a disposable nested KWin/XWayland desktop and a private
+D-Bus session. It exercises editing, persistence/relaunch, actual exported GTK tray menus,
+window modes, transparent input regions, clipboard, workspaces, themes and reminder sound
+fallback. The permission portal is simulated; its real permission dialog still belongs to
+your desktop. Dependencies: `kwin_wayland`, `dbus-run-session`, `xdotool`, `wl-copy` and Python
+GObject/Xlib (Pillow additionally saves a picture of the test note). Logs, a test database and
+the verification result are kept in the printed temporary directory. It never edits your own
+notes or workspaces and never plays audio on your speakers.
+
+`python3 scripts/test-linux-package.py` checks installation, reinstalling and launching the
+desktop entry from a temporary prefix containing spaces and special characters. It needs
+Python GObject and `desktop-file-validate`. Neither test installs into your normal user prefix.
 
 Icons for every platform are generated from `assets/icon.png` (1024×1024) with
 `python scripts/make-icons.py`. The pictures in this README are rendered by the app itself

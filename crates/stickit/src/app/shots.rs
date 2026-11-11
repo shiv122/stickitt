@@ -291,7 +291,7 @@ fn stack(frames: &[Frame]) -> Frame {
 /// Writes premultiplied B,G,R,A pixels as a PNG.
 fn save((w, h, px): &Frame, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut rgba = px.clone();
-    for p in rgba.chunks_exact_mut(4) {
+    for p in rgba.as_chunks_mut::<4>().0 {
         p.swap(0, 2);
     }
     let size = tiny_skia::IntSize::from_wh(*w, *h).ok_or("empty picture")?;

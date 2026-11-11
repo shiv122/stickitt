@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Stick-itt
+GenericName=Sticky Notes
+GenericName[de]=Haftnotizen
+Comment=Markdown notes, reminders and an edge dock
+Comment[de]=Markdown-Notizen, Erinnerungen und ein Rand-Dock
+Exec=stickit
+TryExec=stickit
+Icon=dev.stickitt.Stickitt
+Terminal=false
+Categories=Office;
+StartupNotify=false
+StartupWMClass=dev.stickitt.Stickitt

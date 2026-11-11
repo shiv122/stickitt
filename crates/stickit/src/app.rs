@@ -90,6 +90,14 @@ pub enum UserEvent {
     TrayClick,
     /// Stick-itt was launched again while running.
     Relaunched,
+    #[cfg(target_os = "linux")]
+    PortalAction(GlobalAction),
+    #[cfg(target_os = "linux")]
+    PortalUnavailable,
+    #[cfg(target_os = "linux")]
+    SystemTheme(bool),
+    #[cfg(target_os = "linux")]
+    DesktopsChanged,
 }
 
 pub struct App {
@@ -112,6 +120,8 @@ pub struct App {
     /// "Hide all notes" is on.
     hidden: bool,
     hotkeys: Option<GlobalHotKeyManager>,
+    #[cfg(target_os = "linux")]
+    portal: Option<crate::portal::Shortcuts>,
     tray: Option<Tray>,
     /// Recent closes requested by the system (taskbar, Alt+F4).
     system_closes: Vec<(Instant, WindowId)>,
@@ -163,6 +173,8 @@ impl App {
             active_profile,
             hidden: false,
             hotkeys: None,
+            #[cfg(target_os = "linux")]
+            portal: None,
             tray: None,
             system_closes: Vec::new(),
             toast: None,
@@ -179,6 +191,11 @@ impl App {
         };
         app.reload_model();
         app
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_portal(&mut self, portal: crate::portal::Shortcuts) {
+        self.portal = Some(portal);
     }
 
     // ---- lists & profiles -------------------------------------------------------------------
@@ -789,20 +806,32 @@ impl App {
     // ---- global hotkeys ---------------------------------------------------------------------
 
     fn register_hotkeys(&mut self) {
-        let Some(manager) = self.hotkeys.as_ref() else { return };
-        for (hk, _) in self.bindings.drain(..) {
-            let _ = manager.unregister(hk);
+        if let Some(manager) = self.hotkeys.as_ref() {
+            for (hk, _) in self.bindings.drain(..) {
+                let _ = manager.unregister(hk);
+            }
         }
+        let mut bindings = Vec::new();
         for (action, binding) in &self.shared.config.global {
             if binding.trim().is_empty() {
                 continue;
             }
             match binding.parse::<HotKey>() {
-                Ok(hk) => match manager.register(hk) {
-                    Ok(()) => self.bindings.push((hk, *action)),
-                    Err(e) => eprintln!("stickit: {} ({binding}) unavailable: {e}", action.key()),
-                },
+                Ok(hk) => bindings.push((hk, *action)),
                 Err(e) => eprintln!("stickit: bad shortcut for {}: {e}", action.key()),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = self.portal.as_ref().filter(|p| p.enabled()) {
+            portal.update(bindings.iter().map(|&(hotkey, action)| crate::portal::Binding { action, hotkey }).collect());
+            self.bindings = bindings;
+            return;
+        }
+        let Some(manager) = self.hotkeys.as_ref() else { return };
+        for (hk, action) in bindings {
+            match manager.register(hk) {
+                Ok(()) => self.bindings.push((hk, action)),
+                Err(e) => eprintln!("stickit: {} ({hk}) unavailable: {e}", action.key()),
             }
         }
     }
@@ -923,6 +952,46 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         match event {
+            #[cfg(target_os = "linux")]
+            UserEvent::DesktopsChanged => {
+                let previous = self.current_desktop.clone();
+                self.update_current_desktop();
+                if previous != self.current_desktop && self.shared.config.desktops.profile_per_desktop {
+                    let key = self.profile_key(self.current_desktop.as_deref());
+                    self.active_profile =
+                        self.store.setting(&key).and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_PROFILE);
+                    self.reload_model();
+                }
+                for note in self.notes.values_mut() {
+                    if let Some(desktop) = self.desktops.of(&note.window) {
+                        if note.desktop.as_deref() != Some(desktop.as_str()) {
+                            note.desktop = Some(desktop);
+                            note.dirty = true;
+                        }
+                    }
+                }
+                self.apply_visibility();
+            }
+            #[cfg(target_os = "linux")]
+            UserEvent::PortalAction(action) => self.run_global(el, action),
+            #[cfg(target_os = "linux")]
+            UserEvent::PortalUnavailable => {
+                self.portal = None;
+                self.register_hotkeys();
+            }
+            #[cfg(target_os = "linux")]
+            UserEvent::SystemTheme(dark) => {
+                crate::theme::set_system_dark(dark);
+                for note in self.notes.values_mut() {
+                    note.refresh_theme();
+                }
+                if let Some(dock) = self.dock.as_mut() {
+                    dock.refresh_theme();
+                }
+                if let Some(toast) = self.toast.as_mut() {
+                    toast.refresh_theme();
+                }
+            }
             UserEvent::Hotkey(id) => {
                 if let Some(&(_, action)) = self.bindings.iter().find(|(hk, _)| hk.id() == id) {
                     self.run_global(el, action);

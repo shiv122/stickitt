@@ -16,7 +16,7 @@ use winit::window::Window;
 pub type Context = softbuffer::Context<OwnedDisplayHandle>;
 
 /// Whether the platform composites our alpha channel (and we must draw our own shadows).
-pub const ALPHA: bool = cfg!(any(windows, target_os = "macos"));
+pub const ALPHA: bool = cfg!(any(windows, target_os = "macos", target_os = "linux"));
 
 pub struct Surface {
     inner: imp::Surface,
@@ -366,26 +366,55 @@ mod imp {
     use winit::event_loop::OwnedDisplayHandle;
     use winit::window::Window;
 
-    pub struct Surface(softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>);
+    pub struct Surface {
+        buffer: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
+        #[cfg(target_os = "linux")]
+        window: Rc<Window>,
+        #[cfg(target_os = "linux")]
+        input: Vec<x11rb::protocol::xproto::Rectangle>,
+    }
 
     impl Surface {
         pub fn new(ctx: &Context, window: &Rc<Window>, _tool: bool) -> Result<Self, Box<dyn Error>> {
-            Ok(Self(softbuffer::Surface::new(ctx, window.clone())?))
+            Ok(Self {
+                buffer: softbuffer::Surface::new(ctx, window.clone())?,
+                #[cfg(target_os = "linux")]
+                window: window.clone(),
+                #[cfg(target_os = "linux")]
+                input: Vec::new(),
+            })
         }
 
-        pub fn pin_to_bottom(&mut self, _on: bool) {}
+        pub fn pin_to_bottom(&mut self, _on: bool) {
+            #[cfg(target_os = "linux")]
+            crate::linux::pin_to_bottom(&self.window, _on);
+        }
 
         pub fn trim(&mut self) {}
 
         pub fn paint(&mut self, w: u32, h: u32, _opacity: u8, draw: impl FnOnce(&mut [u8])) {
             let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else { return };
-            if self.0.resize(nw, nh).is_err() {
+            if self.buffer.resize(nw, nh).is_err() {
                 return;
             }
-            let Ok(mut buf) = self.0.buffer_mut() else { return };
+            let Ok(mut buf) = self.buffer.buffer_mut() else { return };
             let data: &mut [u8] = bytemuck::cast_slice_mut(&mut buf[..]);
             data.fill(0);
             draw(data);
+            #[cfg(target_os = "linux")]
+            {
+                let input = crate::linux::input_region(data, w);
+                if input.len() != self.input.len()
+                    || input
+                        .iter()
+                        .zip(&self.input)
+                        .any(|(a, b)| (a.x, a.y, a.width, a.height) != (b.x, b.y, b.width, b.height))
+                {
+                    crate::linux::set_input_region(&self.window, &input);
+                    self.input = input;
+                }
+                crate::linux::opacity(data, _opacity);
+            }
             let _ = buf.present();
         }
     }

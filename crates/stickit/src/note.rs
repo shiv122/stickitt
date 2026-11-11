@@ -487,7 +487,7 @@ impl Note {
         let mode = Mode::from_u8(rec.mode);
         let mut attrs = Window::default_attributes()
             // macOS: a see-through window (our pixels carry the alpha).
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(cfg!(any(target_os = "macos", target_os = "linux")))
             .with_title("Stick-itt")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(rec.size.0, rec.size.1))
@@ -503,6 +503,11 @@ impl Note {
         if let Some((x, y)) = placed_at {
             attrs = attrs.with_position(PhysicalPosition::new(x, y));
         }
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs = attrs.with_name(crate::portal::APP_ID, crate::kwin::instance(&format!("note-{}", rec.id)));
+        }
         #[cfg(windows)]
         {
             use winit::platform::windows::WindowAttributesExtWindows;
@@ -517,6 +522,15 @@ impl Note {
         }
 
         let window = Rc::new(el.create_window(attrs)?);
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux::show_on_all(&window, !shared.config.desktops.per_desktop);
+            if shared.config.desktops.per_desktop {
+                if let Some(desktop) = &rec.desktop {
+                    crate::desktops::Desktops::new().move_to(&window, desktop);
+                }
+            }
+        }
         window.set_ime_allowed(true);
         #[cfg(target_os = "macos")]
         crate::desktops::show_on_all(&window, !shared.config.desktops.per_desktop);
@@ -1877,6 +1891,22 @@ impl Note {
             );
         }
         if self.collapsed() {
+            if let WindowEvent::KeyboardInput { event, is_synthetic: false, .. } = event {
+                if event.state == ElementState::Pressed {
+                    if let Some(
+                        action @ (NoteAction::Quit
+                        | NoteAction::CloseNote
+                        | NoteAction::DeleteNote
+                        | NoteAction::ToggleCompact
+                        | NoteAction::NewNote
+                        | NoteAction::OpenSettings
+                        | NoteAction::CycleMode),
+                    ) = shared.config.note_action(event, self.mods)
+                    {
+                        return self.run_action(action, shared);
+                    }
+                }
+            }
             if let Some(result) = self.handle_compact(event) {
                 return result;
             }

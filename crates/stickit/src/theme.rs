@@ -16,6 +16,13 @@ pub enum Appearance {
 }
 
 static APPEARANCE: AtomicU8 = AtomicU8::new(Appearance::Auto as u8);
+#[cfg(target_os = "linux")]
+static SYSTEM_DARK: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_os = "linux")]
+pub fn set_system_dark(dark: bool) {
+    SYSTEM_DARK.store(1 + u8::from(dark), Ordering::Relaxed);
+}
 
 /// Applies the settings' choice to every window drawn from now on.
 pub fn set_appearance(a: Appearance) {
@@ -27,7 +34,15 @@ pub fn is_dark(system: Option<Theme>) -> bool {
     match APPEARANCE.load(Ordering::Relaxed) {
         x if x == Appearance::Light as u8 => false,
         x if x == Appearance::Dark as u8 => true,
-        _ => system == Some(Theme::Dark),
+        _ => {
+            #[cfg(target_os = "linux")]
+            match SYSTEM_DARK.load(Ordering::Relaxed) {
+                1 => return false,
+                2 => return true,
+                _ => {}
+            }
+            system == Some(Theme::Dark)
+        }
     }
 }
 

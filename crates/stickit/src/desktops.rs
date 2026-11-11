@@ -51,7 +51,9 @@ impl Desktops {
 pub fn show_on_all(window: &Window, on: bool) {
     #[cfg(target_os = "macos")]
     imp::show_on_all(window, on);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    crate::linux::show_on_all(window, on);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (window, on);
 }
 
@@ -407,7 +409,71 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use crate::linux::{self, x11};
+    use winit::window::Window;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+
+    pub struct Manager;
+
+    pub fn hwnd(window: &Window) -> Option<u32> {
+        linux::xid(window)
+    }
+
+    impl Manager {
+        pub fn new() -> Self {
+            Self
+        }
+        pub fn of(&self, window: u32) -> Option<String> {
+            if crate::kwin::active() {
+                return crate::kwin::of(window)?.first().cloned();
+            }
+            Some(x11()?.desktop(window)?.to_string())
+        }
+        pub fn is_current(&self, window: u32) -> Option<bool> {
+            if crate::kwin::active() {
+                let desktops = crate::kwin::of(window)?;
+                return Some(desktops.is_empty() || crate::kwin::current().is_some_and(|d| desktops.contains(&d)));
+            }
+            let x = x11()?;
+            let desktop = x.cardinal(window, x.atoms._NET_WM_DESKTOP)?;
+            Some(desktop == u32::MAX || Some(desktop) == x.current_desktop())
+        }
+        pub fn move_to(&self, window: u32, desktop: &str) -> bool {
+            if crate::kwin::active() {
+                return crate::kwin::move_id(window, Some(desktop));
+            }
+            let (Some(x), Ok(desktop)) = (x11(), desktop.parse::<u32>()) else { return false };
+            // The all-desktops sentinel is reserved for show_on_all, not a saved desktop id.
+            desktop != u32::MAX && x.move_to(window, desktop)
+        }
+        pub fn of_foreground(&self) -> Option<String> {
+            if crate::kwin::active() {
+                return crate::kwin::current();
+            }
+            // The root's current desktop also works while a native Wayland app has focus.
+            Some(x11()?.current_desktop()?.to_string())
+        }
+        pub fn list(&self) -> Vec<(String, Option<String>)> {
+            if let Some(desktops) = crate::kwin::list() {
+                return desktops;
+            }
+            let Some(x) = x11() else { return Vec::new() };
+            let count = x.cardinal(x.root, x.atoms._NET_NUMBER_OF_DESKTOPS).unwrap_or(0);
+            let names = x
+                .conn
+                .get_property(false, x.root, x.atoms._NET_DESKTOP_NAMES, AtomEnum::ANY, 0, 4096)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|p| p.value)
+                .unwrap_or_default();
+            linux::names(&names, count)
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod imp {
     use winit::window::Window;
 

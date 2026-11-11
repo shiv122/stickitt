@@ -327,7 +327,7 @@ impl Dock {
         let monitor = (mon.position(), mon.size(), mon.scale_factor());
         let attrs = Window::default_attributes()
             // macOS: a see-through window (our pixels carry the alpha).
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(cfg!(any(target_os = "macos", target_os = "linux")))
             .with_title("Stick-itt")
             .with_decorations(false)
             .with_resizable(false)
@@ -340,7 +340,14 @@ impl Dock {
             use winit::platform::windows::WindowAttributesExtWindows;
             attrs.with_skip_taskbar(true)
         };
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs.with_name(crate::portal::APP_ID, crate::kwin::instance("dock"))
+        };
         let window = Rc::new(el.create_window(attrs)?);
+        #[cfg(target_os = "linux")]
+        crate::linux::utility(&window);
         // The edge tab is there on every desktop (macOS Spaces, full-screen apps included).
         crate::desktops::show_on_all(&window, true);
         let surface = Surface::new(ctx, &window, true)?;

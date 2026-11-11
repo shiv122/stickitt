@@ -15,7 +15,11 @@ pub fn left_button_down() -> bool {
         let buttons: usize = unsafe { objc2::msg_send![objc2::class!(NSEvent), pressedMouseButtons] };
         buttons & 1 != 0
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::pointer_mask().is_some_and(|m| m.contains(x11rb::protocol::xproto::KeyButMask::BUTTON1))
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         true
     }
@@ -34,7 +38,11 @@ pub fn resize_modifier_held() -> bool {
         let flags: usize = unsafe { objc2::msg_send![objc2::class!(NSEvent), modifierFlags] };
         flags & ((1 << 18) | (1 << 20)) != 0
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::pointer_mask().is_some_and(|m| m.contains(x11rb::protocol::xproto::KeyButMask::CONTROL))
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         false
     }

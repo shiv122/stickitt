@@ -9,10 +9,16 @@ mod editor;
 mod gfx;
 mod input;
 mod instance;
+#[cfg(target_os = "linux")]
+mod kwin;
+#[cfg(target_os = "linux")]
+mod linux;
 mod markdown;
 mod motion;
 mod note;
 mod popover;
+#[cfg(target_os = "linux")]
+mod portal;
 mod reminder;
 mod store;
 mod surface;
@@ -85,7 +91,20 @@ fn main() {
     let instance = if bench.is_some() {
         None
     } else {
-        match instance::acquire(&std::path::absolute(&db_path).unwrap_or_else(|_| db_path.clone())) {
+        if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("stickit: cannot create database directory: {e}");
+                std::process::exit(1);
+            }
+        }
+        let key = std::fs::canonicalize(&db_path).unwrap_or_else(|_| {
+            db_path
+                .parent()
+                .and_then(|p| std::fs::canonicalize(p).ok())
+                .and_then(|p| db_path.file_name().map(|name| p.join(name)))
+                .unwrap_or_else(|| std::path::absolute(&db_path).unwrap_or_else(|_| db_path.clone()))
+        });
+        match instance::acquire(&key) {
             Some(i) => Some(i),
             None => return,
         }
@@ -102,7 +121,18 @@ fn main() {
         if bench.is_some() { config_path } else { Some(config_path.unwrap_or_else(|| data_dir.join("stickit.ini"))) };
     let config = config::Config::load(config_path);
 
-    let event_loop = EventLoop::<app::UserEvent>::with_user_event().build().expect("event loop");
+    let mut builder = EventLoop::<app::UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        // xdg-toplevel cannot position, hide or stack notes; use XWayland on Wayland desktops.
+        builder.with_x11();
+        if crate::linux::x11().is_none() {
+            eprintln!("stickit: an X11 display is required. On Wayland, install and enable XWayland.");
+            std::process::exit(1);
+        }
+    }
+    let event_loop = builder.build().expect("event loop");
     // Hotkeys, tray clicks, tray menu picks and relaunches arrive outside the window system;
     // forward them into the event loop.
     let send = |proxy: &Mutex<winit::event_loop::EventLoopProxy<app::UserEvent>>, e| {
@@ -129,8 +159,15 @@ fn main() {
         instance.listen(move || send(&proxy, app::UserEvent::Relaunched));
     }
     let bench = bench.map(|notes| app::Bench { notes, big });
+    #[cfg(target_os = "linux")]
+    let _kwin = kwin::Bridge::new(event_loop.create_proxy());
+    #[cfg(target_os = "linux")]
+    let portal = portal::Shortcuts::new(event_loop.create_proxy());
     let mut app = app::App::new(store, bench, shots.map(app::Shots::new), config);
+    #[cfg(target_os = "linux")]
+    app.set_portal(portal);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("stickit: {e}");
+        std::process::exit(1);
     }
 }

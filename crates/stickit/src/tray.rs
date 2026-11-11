@@ -22,7 +22,7 @@ pub enum TrayCmd {
     Quit,
 }
 
-pub struct Tray {
+pub struct NativeTray {
     _icon: TrayIcon,
     toggle: MenuItem,
     hidden: Submenu,
@@ -43,7 +43,7 @@ fn item(id: &str, text: &str, hint: &str) -> MenuItem {
     MenuItem::with_id(id, text, true, hint.parse::<Accelerator>().ok())
 }
 
-impl Tray {
+impl NativeTray {
     /// `rgba` is a square icon image.
     pub fn new(rgba: Vec<u8>, size: u32, hints: Hints) -> Option<Self> {
         let icon = Icon::from_rgba(rgba, size, size).ok()?;
@@ -115,6 +115,111 @@ impl Tray {
             "quit" => TrayCmd::Quit,
             other => TrayCmd::Reveal(other.strip_prefix(NOTE_PREFIX)?.parse().ok()?),
         })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub type Tray = NativeTray;
+
+#[cfg(target_os = "linux")]
+pub use gtk_tray::Tray;
+
+#[cfg(target_os = "linux")]
+mod gtk_tray {
+    use super::{Hints, NativeTray, TrayCmd};
+    use gtk::glib::{self, ControlFlow, MainContext, Priority};
+    use std::sync::{mpsc, OnceLock};
+
+    enum Command {
+        Create { rgba: Vec<u8>, size: u32, hints: [String; 5], ready: mpsc::Sender<bool> },
+        Hidden(Vec<(i64, String)>),
+        Toggle(bool),
+        Clear,
+    }
+
+    // GTK3's matching glib release uses channels to wake its loop without idle polling.
+    #[allow(deprecated)]
+    fn runtime() -> Option<glib::Sender<Command>> {
+        static RUNTIME: OnceLock<Option<glib::Sender<Command>>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                let (tx, rx) = MainContext::channel(Priority::DEFAULT);
+                let (ready_tx, ready_rx) = mpsc::channel();
+                std::thread::Builder::new()
+                    .name("stickit-tray".into())
+                    .spawn(move || {
+                        if let Err(e) = gtk::init() {
+                            eprintln!("stickit: cannot initialize GTK tray: {e}");
+                            let _ = ready_tx.send(false);
+                            return;
+                        }
+                        let mut tray: Option<NativeTray> = None;
+                        rx.attach(None, move |command| {
+                            match command {
+                                Command::Create { rgba, size, hints, ready } => {
+                                    tray = NativeTray::new(
+                                        rgba,
+                                        size,
+                                        Hints {
+                                            new_note: &hints[0],
+                                            paste_as_note: &hints[1],
+                                            open_dock: &hints[2],
+                                            toggle_notes: &hints[3],
+                                            settings: &hints[4],
+                                        },
+                                    );
+                                    let _ = ready.send(tray.is_some());
+                                }
+                                Command::Hidden(notes) => {
+                                    if let Some(tray) = tray.as_mut() {
+                                        tray.set_hidden_notes(notes);
+                                    }
+                                }
+                                Command::Toggle(hidden) => {
+                                    if let Some(tray) = tray.as_ref() {
+                                        tray.set_notes_hidden(hidden);
+                                    }
+                                }
+                                Command::Clear => tray = None,
+                            }
+                            ControlFlow::Continue
+                        });
+                        let _ = ready_tx.send(true);
+                        gtk::main();
+                    })
+                    .ok()?;
+                ready_rx.recv().ok()?.then_some(tx)
+            })
+            .clone()
+    }
+
+    #[allow(deprecated)]
+    pub struct Tray(glib::Sender<Command>);
+
+    impl Tray {
+        pub fn new(rgba: Vec<u8>, size: u32, hints: Hints) -> Option<Self> {
+            let tx = runtime()?;
+            let (ready, rx) = mpsc::channel();
+            let hints = [hints.new_note, hints.paste_as_note, hints.open_dock, hints.toggle_notes, hints.settings]
+                .map(str::to_owned);
+            tx.send(Command::Create { rgba, size, hints, ready }).ok()?;
+            rx.recv().ok()?.then_some(Self(tx))
+        }
+        pub fn set_hidden_notes(&mut self, notes: Vec<(i64, String)>) {
+            let _ = self.0.send(Command::Hidden(notes));
+        }
+        pub fn set_notes_hidden(&self, hidden: bool) {
+            let _ = self.0.send(Command::Toggle(hidden));
+        }
+        pub fn command(id: &str) -> Option<TrayCmd> {
+            NativeTray::command(id)
+        }
+    }
+
+    impl Drop for Tray {
+        fn drop(&mut self) {
+            let _ = self.0.send(Command::Clear);
+        }
     }
 }
 

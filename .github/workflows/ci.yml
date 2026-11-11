@@ -51,3 +51,34 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --locked
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libx11-dev libxkbcommon-dev \
+            kwin-wayland xwayland dbus-x11 xdotool wl-clipboard \
+            python3-gi python3-xlib python3-pil desktop-file-utils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check native build dependencies
+        run: pkg-config --exists gtk+-3.0 x11 xkbcommon
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - name: Build Linux package
+        run: bash scripts/package-linux.sh
+      - name: Installer regression
+        run: python3 scripts/test-linux-package.py
+      - name: Desktop integration
+        run: python3 scripts/test-linux.py --binary target/release/stickit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/Stick-itt-*-linux-*.tar.gz*
+          if-no-files-found: error

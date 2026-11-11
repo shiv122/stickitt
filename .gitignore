@@ -19,6 +19,7 @@
 # Editors and OS files
 .vscode/
 .idea/
+__pycache__/
 *.swp
 *~
 .DS_Store

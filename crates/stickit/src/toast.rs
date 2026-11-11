@@ -77,7 +77,7 @@ impl Toast {
         let y = mp.y + ms.height as i32 - ((BOTTOM + PILL_H + MARGIN) * scale) as i32;
         let attrs = Window::default_attributes()
             // macOS: a see-through window (our pixels carry the alpha).
-            .with_transparent(cfg!(target_os = "macos"))
+            .with_transparent(cfg!(any(target_os = "macos", target_os = "linux")))
             .with_title("Stick-itt")
             .with_decorations(false)
             .with_resizable(false)
@@ -91,7 +91,14 @@ impl Toast {
             use winit::platform::windows::WindowAttributesExtWindows;
             attrs.with_skip_taskbar(true)
         };
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::x11::WindowAttributesExtX11;
+            attrs.with_name(crate::portal::APP_ID, crate::kwin::instance(&format!("toast-{note}")))
+        };
         let window = Rc::new(el.create_window(attrs)?);
+        #[cfg(target_os = "linux")]
+        crate::linux::utility(&window);
         let surface = Surface::new(ctx, &window, true)?;
         let dark = crate::theme::is_dark(window.theme());
         let mut shown = Motion::new(0.0, Feel::Snappy);

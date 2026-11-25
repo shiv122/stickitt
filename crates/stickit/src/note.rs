@@ -445,6 +445,8 @@ pub struct Note {
     /// window moves with the pointer itself rather than by a native drag, which on macOS would
     /// force the arrow cursor and give no events until it ends.)
     moving: Option<(f64, f64)>,
+    /// The part of the window that takes clicks, as last applied (physical px).
+    click_area: Option<(i32, i32, i32, i32)>,
     /// "Delete note" was clicked once.
     confirm_delete: bool,
     /// Reminder menu state: typed text, chosen day (days from today) and repeat.
@@ -606,6 +608,7 @@ impl Note {
             full_size: LogicalSize::new(rec.size.0, rec.size.1),
             press_at: None,
             moving: None,
+            click_area: None,
             confirm_delete: false,
             remind_query: String::new(),
             remind_day: 0,
@@ -622,6 +625,7 @@ impl Note {
         note.render(shared);
         if note.shown {
             note.window.set_visible(true);
+            note.reapply_click_area();
         }
         Ok(note)
     }
@@ -719,6 +723,10 @@ impl Note {
     /// Sizes the window for the current view: a compact line, or the full page.
     fn apply_view(&mut self, fonts: &mut FontSystem) {
         let (mx, mt, mb) = (MARGIN.0 as f64, MARGIN.1 as f64, MARGIN.2 as f64);
+        // The window takes the view's own size, so room a menu had added is gone. Left set, it
+        // was taken off the one-line card (picking "Compact view" from a menu that had grown the
+        // note left a 1px line), and it isn't recomputed while the note is a line.
+        self.extra_h = 0;
         if self.collapsed() {
             let w = self.compact_width(fonts) as f64;
             self.window.set_min_inner_size(None::<LogicalSize<f64>>);
@@ -915,6 +923,27 @@ impl Note {
         let (w, h) = self.size();
         let (mx, mt, mb) = (MARGIN.0 * s, MARGIN.1 * s, MARGIN.2 * s);
         (mx, mt, (w - 2.0 * mx).max(1.0), (h - mt - mb - self.extra_h as f32).max(1.0))
+    }
+
+    /// Sends the click area again on the next frame: after the window is shown (macOS may drop a
+    /// hidden window's area) or moves to a screen with another scale.
+    fn reapply_click_area(&mut self) {
+        self.click_area = None;
+        self.needs_paint = true;
+    }
+
+    /// Lets clicks on the shadow around the card reach what is under it (see `click_area`).
+    fn sync_click_area(&mut self) {
+        let s = self.scale();
+        let menu = self.popover.is_some() || self.extra_h > 0;
+        let area = click_area(self.card(), self.size(), EDGE * s, self.collapsed(), menu);
+        let key = (area.0.round() as i32, area.1.round() as i32, area.2.round() as i32, area.3.round() as i32);
+        if self.click_area != Some(key) {
+            let s = s as f64;
+            let logical = (area.0 as f64 / s, area.1 as f64 / s, area.2 as f64 / s, area.3 as f64 / s);
+            // Kept only once in place, so a failed attempt is tried again on the next frame.
+            self.click_area = crate::input::set_click_area(&self.window, logical).then_some(key);
+        }
     }
 
     /// Whether a window point is on the card (not on the shadow around it).
@@ -1612,6 +1641,7 @@ impl Note {
             crate::chime::play();
         }
         self.window.set_visible(true);
+        self.reapply_click_area();
         self.window.set_minimized(false);
         self.apply_level();
         self.window.focus_window();
@@ -1900,6 +1930,8 @@ impl Note {
                 self.layout_dirty = true;
                 self.dirty = true;
                 self.needs_paint = true;
+                // The area is given to macOS in points, which a new scale changes.
+                self.reapply_click_area();
             }
             WindowEvent::Moved(p) => {
                 let minimized = self.window.is_minimized().unwrap_or(false);
@@ -3922,6 +3954,7 @@ impl Note {
         }
         self.shown = true;
         self.window.set_visible(true);
+        self.reapply_click_area();
         self.window.set_minimized(false);
         self.bring_on_screen();
         self.peeking = false;
@@ -4231,11 +4264,13 @@ impl Note {
             return;
         }
         if self.collapsed() {
+            self.sync_click_area();
             return self.render_compact(shared);
         }
         if self.popover.is_some() || self.extra_h > 0 {
             self.fit_popover(shared);
         }
+        self.sync_click_area();
         let PhysicalSize { width, height } = self.window.inner_size();
         self.sync_layout(&mut shared.fonts);
 
@@ -4895,9 +4930,52 @@ fn draw_icon(pm: &mut PixmapMut, icon: Icon, cx: f32, cy: f32, s: f32, c: Rgb, a
     }
 }
 
+/// The part of a note window that takes clicks (physical px: x, y, w, h), given its card and
+/// window size. A one-line note takes them on its card only; a page also on the resize handles
+/// reaching `edge` past the card; an open menu can overflow the card, so then the whole window.
+fn click_area(
+    (kx, ky, kw, kh): (f32, f32, f32, f32),
+    (w, h): (f32, f32),
+    edge: f32,
+    collapsed: bool,
+    menu: bool,
+) -> (f32, f32, f32, f32) {
+    if menu {
+        return (0.0, 0.0, w, h);
+    }
+    if collapsed {
+        return (kx, ky, kw, kh);
+    }
+    let (x0, y0) = ((kx - edge).max(0.0), (ky - edge).max(0.0));
+    let (x1, y1) = ((kx + kw + edge).min(w), (ky + kh + edge).min(h));
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_line_note_takes_clicks_on_its_card_only() {
+        // The shadow below the pill (the bottom margin) lets clicks through to what is under it.
+        let card = (44.0, 32.0, 270.0, 72.0);
+        assert_eq!(click_area(card, (358.0, 164.0), 14.0, true, false), card);
+    }
+
+    #[test]
+    fn a_page_takes_clicks_on_its_card_and_resize_handles() {
+        let area = click_area((44.0, 32.0, 560.0, 500.0), (648.0, 592.0), 14.0, false, false);
+        assert_eq!(area, (30.0, 18.0, 588.0, 528.0));
+        // Never past the window.
+        let area = click_area((4.0, 4.0, 100.0, 100.0), (108.0, 108.0), 14.0, false, false);
+        assert_eq!(area, (0.0, 0.0, 108.0, 108.0));
+    }
+
+    #[test]
+    fn an_open_menu_keeps_the_whole_window_clickable() {
+        let area = click_area((44.0, 32.0, 270.0, 72.0), (358.0, 400.0), 14.0, true, true);
+        assert_eq!(area, (0.0, 0.0, 358.0, 400.0));
+    }
 
     #[test]
     fn titles_skip_markdown_and_rules() {

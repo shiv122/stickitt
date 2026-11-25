@@ -46,6 +46,95 @@ pub fn debug() -> bool {
     *ON.get_or_init(|| std::env::var_os("STICKIT_DEBUG").is_some_and(|v| v != "0"))
 }
 
+/// Limits where `window` takes clicks to `area` (logical px from its top-left: x, y, w, h);
+/// clicks elsewhere go to whatever is under it. macOS only: there the faint shadow a note draws
+/// around its card catches clicks meant for the window below. Uses CoreGraphics' window event
+/// shape, looked up at runtime; without it, the whole window keeps taking clicks. Returns
+/// whether the area is in place (always, where there is nothing to do).
+pub fn set_click_area(window: &winit::window::Window, area: (f64, f64, f64, f64)) -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::set_click_area(window, area);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, area);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use std::ffi::{c_char, c_void, CStr};
+    use std::sync::OnceLock;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    type MainConnection = unsafe extern "C" fn() -> i32;
+    type NewRegion = unsafe extern "C" fn(*const CGRect, *mut *mut c_void) -> i32;
+    type SetEventShape = unsafe extern "C" fn(i32, i32, *mut c_void) -> i32;
+    type ReleaseRegion = unsafe extern "C" fn(*mut c_void) -> i32;
+
+    extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+    struct Fns {
+        conn: i32,
+        new_region: NewRegion,
+        set_shape: SetEventShape,
+        release: ReleaseRegion,
+    }
+
+    fn fns() -> Option<&'static Fns> {
+        static FNS: OnceLock<Option<Fns>> = OnceLock::new();
+        FNS.get_or_init(|| unsafe {
+            unsafe fn lookup<T: Copy>(name: &CStr) -> Option<T> {
+                let p = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+                // SAFETY: T is the function pointer type of `name`.
+                (!p.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) })
+            }
+            let conn: MainConnection = lookup(c"CGSMainConnectionID")?;
+            Some(Fns {
+                conn: conn(),
+                new_region: lookup(c"CGSNewRegionWithRect")?,
+                set_shape: lookup(c"CGSSetWindowEventShape")?,
+                release: lookup(c"CGSReleaseRegion")?,
+            })
+        })
+        .as_ref()
+    }
+
+    pub fn set_click_area(window: &winit::window::Window, (x, y, w, h): (f64, f64, f64, f64)) -> bool {
+        // Nothing to call: the whole window takes clicks, as it always did.
+        let Some(f) = fns() else { return true };
+        let Ok(handle) = window.window_handle() else { return false };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return false };
+        // SAFETY: winit's handle holds a valid NSView; the event loop runs on the main thread.
+        let view: &AnyObject = unsafe { handle.ns_view.cast().as_ref() };
+        let Some(ns_window): Option<Retained<AnyObject>> = (unsafe { msg_send![view, window] }) else {
+            return false;
+        };
+        let number: isize = unsafe { msg_send![&*ns_window, windowNumber] };
+        if number <= 0 {
+            return false;
+        }
+        let rect = CGRect::new(CGPoint::new(x, y), CGSize::new(w.max(0.0), h.max(0.0)));
+        let mut region: *mut c_void = std::ptr::null_mut();
+        // SAFETY: CoreGraphics' declarations; the region is released once applied.
+        unsafe {
+            if (f.new_region)(&rect, &mut region) != 0 || region.is_null() {
+                return false;
+            }
+            let applied = (f.set_shape)(f.conn, number as i32, region) == 0;
+            (f.release)(region);
+            applied
+        }
+    }
+}
+
 /// `(x, y)` (window-relative, physical px) lies inside a `size` window.
 pub fn inside(x: f64, y: f64, size: winit::dpi::PhysicalSize<u32>) -> bool {
     x >= 0.0 && y >= 0.0 && x < size.width as f64 && y < size.height as f64
